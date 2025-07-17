@@ -10,7 +10,7 @@ from scipy.sparse.csr import csr_matrix
 def filter(adata, is_mt_gene=None, min_locs=20, min_genes=20, max_genes=None):
     # remove mitochondrial genes    
     if is_mt_gene:
-        non_mt_genes = (~is_mt_gene(adata)).values
+        non_mt_genes = adata.var[~is_mt_gene(adata)].index.values
         adata = adata[:, non_mt_genes]
 
     # retain genes with non-zero expression level in at least ```min_locs``` locations
