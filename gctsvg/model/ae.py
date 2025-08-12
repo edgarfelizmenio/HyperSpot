@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.optim as optim
 
 from torch_geometric.nn import GCNConv, DeepGraphInfomax
-from torch_geometric.nn.models import GCN
+from torch_geometric.nn.models import GCN, GAT
 
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
@@ -11,6 +11,8 @@ from tqdm.auto import tqdm
 from pathlib import Path
 
 from .utils import compute_fc_layer_sizes, create_fc
+
+import lightning as L
 
 def graph_embedding(z, *args, **kwargs):
     return z.mean(dim=0)
@@ -32,35 +34,104 @@ class GCNDGIAELoss(nn.Module):
         return total_loss, reconstruction_loss, dgi_loss
         
 # create an embedding
-class GCNDGIAE(nn.Module):
-    def __init__(self, 
-                 n_in, 
-                 n_out,
-                 Activation="prelu",
-                 summary = graph_embedding,
-                 corruption = shuffle_attributes):
-        super(GCNDGIAE, self).__init__()
-        n_hidden = (n_in + n_out)//2
-        self.encoder = GCN(n_in, n_hidden, 2, n_out, dropout=0.2, act=Activation, jk="cat", improved=True)
-        self.decoder = GCN(n_out, n_hidden, 2, n_in, act=Activation, jk="cat", improved=True)
+# class GCNDGIAE(nn.Module):
+#     def __init__(self, 
+#                  n_in, 
+#                  n_out,
+#                  Activation="prelu",
+#                  summary = graph_embedding,
+#                  corruption = shuffle_attributes):
+#         super(GCNDGIAE, self).__init__()
+#         n_hidden = (n_in + n_out)//2
+#         self.encoder = GCN(n_in, n_hidden, 2, n_out, dropout=0.2, act=Activation, jk="cat", improved=True)
+#         self.decoder = GCN(n_out, n_hidden, 2, n_in, act=Activation, jk="cat", improved=True)
         
+#         self.DGI = DeepGraphInfomax(n_out,
+#                                    self.encoder,
+#                                    summary = summary,
+#                                    corruption = corruption)
+
+#         self.DGI.reset_parameters()
+#         print(self.encoder)
+#         print(self.decoder)
+#         print(self.DGI)
+#         print(self)
+        
+#     def forward(self, x, edge_index):
+#         pos_z, neg_z, summary = self.DGI(x, edge_index) 
+#         dgi_loss = self.DGI.loss(pos_z, neg_z, summary)
+#         reconstruction = self.decoder(pos_z, edge_index)
+#         return pos_z, reconstruction, dgi_loss
+
+class GCNDGIAE(L.LightningModule):
+    def __init__(self, 
+                 n_in,
+                 n_out,
+                 Activation = "leakyrelu",
+                 summary = graph_embedding,
+                 corruption = shuffle_attributes,
+                 alpha=1,
+                 beta=0.1,
+                 lr = 1e-4):
+        super(GCNDGIAE, self).__init__()
+        self.save_hyperparameters()
+        n_hidden = (n_in + n_out) // 2
+        self.encoder = GAT(n_in, n_hidden, 3, n_out, dropout=0.2, act=Activation, jk="cat")
+        self.decoder = GAT(n_out, n_hidden, 3, n_in, act=Activation, jk="cat")        
+
         self.DGI = DeepGraphInfomax(n_out,
                                    self.encoder,
                                    summary = summary,
                                    corruption = corruption)
 
         self.DGI.reset_parameters()
-        print(self.encoder)
-        print(self.decoder)
-        print(self.DGI)
-        print(self)
         
+        self.criterion = GCNDGIAELoss(alpha, beta)
+        self.lr = lr
+
     def forward(self, x, edge_index):
-        pos_z, neg_z, summary = self.DGI(x, edge_index) 
+        pos_z, neg_z, summary = self.DGI(x, edge_index)
         dgi_loss = self.DGI.loss(pos_z, neg_z, summary)
         reconstruction = self.decoder(pos_z, edge_index)
         return pos_z, reconstruction, dgi_loss
-                
+        
+    def training_step(self, batch, batch_idx):
+        X = batch.x
+        edge_index = batch.edge_index
+
+        code, reconstruction, dgi_loss = self(X, edge_index)
+
+        # only compute the loss from the seed nodes of batch
+        # TODO: only compute DGI loss from seed nodes of batch
+        code = code[:batch.batch_size]
+        reconstruction = reconstruction[:batch.batch_size]
+        X = X[:batch.batch_size]
+
+        total_loss, reconstruction_loss, contrastive_loss = self.criterion(reconstruction, X, dgi_loss)
+        
+        self.log('total loss', total_loss, prog_bar=True)
+        self.log('reconstruction loss', reconstruction_loss, prog_bar=True)
+        self.log('contrastive loss', contrastive_loss, prog_bar=True)
+ 
+        return total_loss
+
+    def predict_step(self, batch, batch_idx):
+        X =  batch.x
+        edge_index = batch.edge_index
+        code, reconstruction, _ = self(X, edge_index)
+
+        # only return predictions from seed nodes
+        code = code[:batch.batch_size]
+        reconstruction = reconstruction[:batch.batch_size]
+        
+        # also return node ids of seed for aggregation purposes
+        node_ids = batch.n_id[:batch.batch_size]
+        
+        return node_ids, code, reconstruction
+    
+    def configure_optimizers(self):
+        return optim.Adam(self.parameters(), lr=self.lr, weight_decay=1e-5)
+
 class FFN(nn.Module):
     def __init__(self, n_in, n_out, num_layers=5, Activation=nn.PReLU, dropout=None):
         super(FFN, self).__init__()
@@ -68,7 +139,7 @@ class FFN(nn.Module):
         self.n_out = n_out
 
         layer_sizes = compute_fc_layer_sizes(self.n_in, self.n_out, num_layers=num_layers)
-        print(num_layers, layer_sizes)
+
         self.backbone_fc = create_fc(layer_sizes[:-1], bias=True, Activation=Activation, dropout=dropout)
         if dropout:
             self.out_fc = nn.Sequential(nn.Dropout(dropout), 
@@ -92,67 +163,61 @@ class AutoEncoder(nn.Module):
         reconstruction = self.decoder(code)
         return code, reconstruction
 
-class STDenoiser(object):
-    def __init__(self,
-                 n_in,
-                 n_out,
-                 device,
-                 dtype,
-                 alpha=1,
-                 beta=0.1,
-                 lr=1e-3,
-                 model_path='st_denoiser.pth'):
+# class STDenoiser(object):
+#     def __init__(self,
+#                  n_in,
+#                  n_out,
+#                  device,
+#                  dtype,
+#                  alpha=1,
+#                  beta=0.1,
+#                  lr=1e-3,
+#                  model_path='st_denoiser.pth'):
         
-        self.ae = GCNDGIAE(n_in, n_out).to(device).to(dtype)
-        self.criterion = GCNDGIAELoss(alpha, beta)
-        self.lr = lr
-        self.optimizer =  optim.Adam(self.ae.parameters(), self.lr, weight_decay=1e-5)
+#         self.ae = GCNDGIAE(n_in, n_out).to(device).to(dtype)
+#         self.criterion = GCNDGIAELoss(alpha, beta)
+#         self.lr = lr
+#         self.optimizer =  optim.Adam(self.ae.parameters(), self.lr, weight_decay=1e-5)fssdp
+#         reconstruction_losses = []
 
-        self.model_path = Path(model_path)
-        
-    def fit(self, dataset, num_epochs):
-        total_losses = []
-        contrastive_losses = []
-        reconstruction_losses = []
+#         with tqdm(range(num_epochs)) as e_pbar:
+#             X = dataset.x
+#             edge_index = dataset.edge_index
 
-        with tqdm(range(num_epochs)) as e_pbar:
-            X = dataset.x
-            edge_index = dataset.edge_index
+#             self.ae.train()
+#             for epoch in e_pbar:
+#                 code, reconstruction, dgi_loss = self.ae(X, edge_index)        
+#                 total_loss, reconstruction_loss, contrastive_loss = self.criterion(reconstruction, X, dgi_loss)
 
-            self.ae.train()
-            for epoch in e_pbar:
-                code, reconstruction, dgi_loss = self.ae(X, edge_index)        
-                total_loss, reconstruction_loss, contrastive_loss = self.criterion(reconstruction, X, dgi_loss)
+#                 self.optimizer.zero_grad()
+#                 total_loss.backward()
+#                 self.optimizer.step()
 
-                self.optimizer.zero_grad()
-                total_loss.backward()
-                self.optimizer.step()
-
-                contrastive_losses.append(contrastive_loss.item())
-                reconstruction_losses.append(reconstruction_loss.item())
-                total_losses.append(total_loss.item())
+#                 contrastive_losses.append(contrastive_loss.item())
+#                 reconstruction_losses.append(reconstruction_loss.item())
+#                 total_losses.append(total_loss.item())
                 
-                e_pbar.set_postfix_str(f'Epoch [{epoch + 1}/{num_epochs}], Loss: {total_loss.item():.4f}')
+#                 e_pbar.set_postfix_str(f'Epoch [{epoch + 1}/{num_epochs}], Loss: {total_loss.item():.4f}')
 
 
-        return total_losses, reconstruction_losses, contrastive_losses
+#         return total_losses, reconstruction_losses, contrastive_losses
     
-    def denoise(self, dataset):
-        X = dataset.x
-        edge_index = dataset.edge_index
-        self.ae.eval()
-        with torch.no_grad():
-            code, reconstruction, _ = self.ae(X, edge_index)
+#     def denoise(self, dataset):
+#         X = dataset.x
+#         edge_index = dataset.edge_index
+#         self.ae.eval()
+#         with torch.no_grad():
+#             code, reconstruction, _ = self.ae(X, edge_index)
 
-        code = code.cpu().detach()
-        reconstruction = reconstruction.cpu().detach()
+#         code = code.cpu().detach()
+#         reconstruction = reconstruction.cpu().detach()
 
-        return code, reconstruction
+#         return code, reconstruction
 
-    def fit_denoise(self, dataset, num_epochs):
-        total_losses, reconstruction_losses, contrastive_losses = self.fit(dataset, num_epochs)
-        code, reconstruction = self.denoise(dataset)
-        return code, reconstruction, total_losses, reconstruction_losses, contrastive_losses
+#     def fit_denoise(self, dataset, num_epochs):
+#         total_losses, reconstruction_losses, contrastive_losses = self.fit(dataset, num_epochs)
+#         code, reconstruction = self.denoise(dataset)
+#         return code, reconstruction, total_losses, reconstruction_losses, contrastive_losses
 
 class SCDenoiser(object):
     def __init__(self,

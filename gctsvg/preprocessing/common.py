@@ -13,6 +13,8 @@ def filter(adata, is_mt_gene=None, min_locs=20, min_genes=20, max_genes=None):
         non_mt_genes = adata.var[~is_mt_gene(adata)].index.values
         adata = adata[:, non_mt_genes]
 
+    # TODO: use scanpy's filter_cells and filter_genes
+    
     # retain genes with non-zero expression level in at least ```min_locs``` locations
     non_zero_locs = (adata.X > 0).sum(axis=0)
     keep_genes = non_zero_locs >= min_locs
@@ -34,12 +36,13 @@ def filter(adata, is_mt_gene=None, min_locs=20, min_genes=20, max_genes=None):
 def compute_hvgs(adata):
     sc.pp.highly_variable_genes(adata, flavor="seurat_v3", n_top_genes=3000)
 
-def preprocess(adata, target_sum, max_value, scale=False):
+def preprocess(adata, target_sum = None, max_value = None, scale=False):
     adata.layers['original'] = adata.X.copy()
     sc.pp.normalize_total(adata, target_sum=target_sum)
     sc.pp.log1p(adata)
     if scale:
         sc.pp.scale(adata, zero_center=False, max_value=max_value)
+        adata.X = adata.X.astype('float32')
 
 def use_ensembl_gene_ids(adata, gene_names_col):
     annot = sc.queries.biomart_annotations("hsapiens",
@@ -53,7 +56,7 @@ def use_ensembl_gene_ids(adata, gene_names_col):
     new_adata = adata[:, new_var['SYMBOL']].copy()
     new_adata.var = new_var
     new_adata.var_names_make_unique()
-    # new_adata.var.reset_index().set_index('ENSEMBL')
+
     return new_adata
 
 def get_common_geneset(adata_st, adata_sc):
