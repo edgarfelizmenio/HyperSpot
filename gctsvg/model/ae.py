@@ -12,14 +12,15 @@ from pathlib import Path
 
 from .utils import compute_fc_layer_sizes, create_fc
 
-import lightning as L
-
 def graph_embedding(z, *args, **kwargs):
     return z.mean(dim=0)
 
 def shuffle_attributes(x, edge_index):
     permutation = torch.randperm(x.size(0))
     return x[permutation], edge_index
+
+def make_baseline_data(n_obs, n_vars):
+    return torch.zeros(n_obs, n_vars)
 
 class GCNDGIAELoss(nn.Module):
     def __init__(self, alpha, beta):
@@ -30,6 +31,7 @@ class GCNDGIAELoss(nn.Module):
         
     def forward(self, reconstruction, x, dgi_loss):
         reconstruction_loss = self.reconstruction_criterion(reconstruction, x)
+        total_loss = reconstruction_loss
         total_loss = (self.alpha * reconstruction_loss) + (self.beta * dgi_loss)
         return total_loss, reconstruction_loss, dgi_loss
         
@@ -63,7 +65,7 @@ class GCNDGIAELoss(nn.Module):
 #         reconstruction = self.decoder(pos_z, edge_index)
 #         return pos_z, reconstruction, dgi_loss
 
-class GCNDGIAE(L.LightningModule):
+class GCNDGIAE(nn.Module):
     def __init__(self, 
                  n_in,
                  n_out,
@@ -71,10 +73,9 @@ class GCNDGIAE(L.LightningModule):
                  summary = graph_embedding,
                  corruption = shuffle_attributes,
                  alpha=1,
-                 beta=0.1,
-                 lr = 1e-4):
+                 beta=0.1):
         super(GCNDGIAE, self).__init__()
-        self.save_hyperparameters()
+        # self.save_hyperparameters()
         n_hidden = (n_in + n_out) // 2
         self.encoder = GAT(n_in, n_hidden, 3, n_out, dropout=0.2, act=Activation, jk="cat")
         self.decoder = GAT(n_out, n_hidden, 3, n_in, act=Activation, jk="cat")        
@@ -85,52 +86,15 @@ class GCNDGIAE(L.LightningModule):
                                    corruption = corruption)
 
         self.DGI.reset_parameters()
-        
-        self.criterion = GCNDGIAELoss(alpha, beta)
-        self.lr = lr
 
     def forward(self, x, edge_index):
+        pos_z = self.encoder(x, edge_index)
         pos_z, neg_z, summary = self.DGI(x, edge_index)
         dgi_loss = self.DGI.loss(pos_z, neg_z, summary)
         reconstruction = self.decoder(pos_z, edge_index)
+        # return pos_z, reconstruction
         return pos_z, reconstruction, dgi_loss
-        
-    def training_step(self, batch, batch_idx):
-        X = batch.x
-        edge_index = batch.edge_index
 
-        code, reconstruction, dgi_loss = self(X, edge_index)
-
-        # only compute the loss from the seed nodes of batch
-        # TODO: only compute DGI loss from seed nodes of batch
-        code = code[:batch.batch_size]
-        reconstruction = reconstruction[:batch.batch_size]
-        X = X[:batch.batch_size]
-
-        total_loss, reconstruction_loss, contrastive_loss = self.criterion(reconstruction, X, dgi_loss)
-        
-        self.log('total loss', total_loss, prog_bar=True)
-        self.log('reconstruction loss', reconstruction_loss, prog_bar=True)
-        self.log('contrastive loss', contrastive_loss, prog_bar=True)
- 
-        return total_loss
-
-    def predict_step(self, batch, batch_idx):
-        X =  batch.x
-        edge_index = batch.edge_index
-        code, reconstruction, _ = self(X, edge_index)
-
-        # only return predictions from seed nodes
-        code = code[:batch.batch_size]
-        reconstruction = reconstruction[:batch.batch_size]
-        
-        # also return node ids of seed for aggregation purposes
-        node_ids = batch.n_id[:batch.batch_size]
-        
-        return node_ids, code, reconstruction
-    
-    def configure_optimizers(self):
-        return optim.Adam(self.parameters(), lr=self.lr, weight_decay=1e-5)
 
 class FFN(nn.Module):
     def __init__(self, n_in, n_out, num_layers=5, Activation=nn.PReLU, dropout=None):

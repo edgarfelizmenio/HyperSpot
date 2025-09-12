@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.optim as optim
 
 from torch_geometric.nn import GCNConv
+from torch_geometric.nn.models import GAT
 from torch_geometric.nn.norm import GraphNorm
 
 from torch.utils.data import DataLoader
@@ -11,6 +12,64 @@ from tqdm.auto import tqdm
 from pathlib import Path
 
 from .utils import compute_fc_layer_sizes, create_fc
+
+import Lightning as L
+
+class StackClassifier(L.LightningModule):
+    def __init__(self, 
+                 embedder_ckpt_path,
+                 classifier_ckpt_path):
+        super(StackClassifier, self).__init__()
+        self.encoder = GCNDGIAE.load_from_checkpoint(embedder_ckpt_path).encoder
+        self.classifier = GNNClassifier.load_from_checkpoint(classifier_ckpt_path).gnn
+
+        self.encoder.freeze()
+        self.classifier.freeze()
+
+    def forward(self, x, edge_index):
+        embedding = self.encoder(x, edge_index)
+        yhat = self.classifier(embedding, edge_index)
+        return yhat
+
+class GNNClassifier(L.LightningModule):
+    def __init__(self, 
+                 num_features, 
+                 num_classes,
+                 Activation = "leakyrelu",
+                 lr=1e-4
+                ):
+        super(GNNClassifier, self).__init__()
+        self.num_features = num_features
+        self.num_classes = num_classes
+        n_hidden = (self.num_features + self.num_classes) // 2
+        self.gnn = GAT(self.num_features, n_hidden, 3, self.num_classes, dropout=0.2, act=Activation, jk="cat")
+        self.criterion = nn.CrossEntropyLoss(reduction='mean')
+    
+    def forward(self, x, edge_index):
+        return self.gnn(x, edge_index)
+    
+    def training_step(self, batch, batch_idx):
+        X = batch.x
+        labels = batch.y
+        edge_index = batch.edge_index
+        yhat = self(X, edge_index)
+
+        # Only compute the loss on the seed nodes of the batch.
+        # Use neighborloader for batching
+        yhat = yhat[:batch.batch_size]
+        labels = labels[:batch.batch_size]
+        
+        loss = self.criterion(yhat, labels)
+        self.log('loss', loss, prog_bar=True)
+
+        return loss
+    
+    def predict_step(self, batch, batch_idx):
+        pass
+
+    def configure_optimizers(self):
+        return optim.Adam(self.parameters(), lr=self.lr, weight_decay=1e-5)
+        
 
 class Classifier(nn.Module):
     def __init__(self, n_feats, n_classes, num_layers=5):

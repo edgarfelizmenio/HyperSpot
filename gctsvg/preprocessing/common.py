@@ -7,29 +7,17 @@ import pandas as pd
 from scipy.sparse.csc import csc_matrix
 from scipy.sparse.csr import csr_matrix
 
-def filter(adata, is_mt_gene=None, min_locs=20, min_genes=20, max_genes=None):
+def filter(adata, is_mt_gene=None, min_genes=20, min_locs=20, max_genes=None, max_locs=None):
+    sc.pp.calculate_qc_metrics(adata, inplace=True)
+
     # remove mitochondrial genes    
     if is_mt_gene:
         non_mt_genes = adata.var[~is_mt_gene(adata)].index.values
         adata = adata[:, non_mt_genes]
-
-    # TODO: use scanpy's filter_cells and filter_genes
     
-    # retain genes with non-zero expression level in at least ```min_locs``` locations
-    non_zero_locs = (adata.X > 0).sum(axis=0)
-    keep_genes = non_zero_locs >= min_locs
-    adata = adata[:, keep_genes]
-    
-    # retain locations with non-zero expression value for at least ```min_genes``` genes
-    non_zero_genes = (adata.X > 0).sum(axis=1)
-    keep_locs = non_zero_genes >= min_genes
-
-    if max_genes:
-        keep_locs = non_zero_genes >= min_genes & non_zero_genes <= max_genes
-    else:
-        keep_locs = non_zero_genes >= min_genes
-
-    adata = adata[keep_locs, :]
+    # Use scanpy's filter_cells and filter_genes
+    sc.pp.filter_cells(adata, min_genes=min_genes, max_genes=max_genes)
+    sc.pp.filter_genes(adata, min_cells=min_locs, max_cells=max_locs)
     
     return adata
 

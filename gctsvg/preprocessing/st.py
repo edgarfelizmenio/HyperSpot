@@ -1,5 +1,6 @@
 import torch
 import numpy as np
+import pandas as pd
 import squidpy as sq
 from PIL import Image
 
@@ -30,12 +31,15 @@ def get_image(adata, to_uint8=True, scale=False):
     return image
 
 def build_graph(adata, k, loop=False):
-    coords = torch.tensor(adata.obsm['spatial'])
+    if isinstance(adata.obsm['spatial'], pd.DataFrame):
+        coords = torch.from_numpy(adata.obsm['spatial'].values)
+    else:
+        coords = torch.tensor(adata.obsm['spatial'])
     edge_index = knn_graph(coords, k=k, loop=loop)
     edge_index = to_undirected(edge_index, num_nodes=adata.n_obs)
     return edge_index
 
-def create_graph_data(adata, k=18, self_loops=False, layer=None):
+def create_graph_data(adata, k=6, self_loops=False, layer=None):
     # cell_types = adata.uns['cell_types']
     if layer:
         feats = torch.tensor(adata.layers[layer].toarray())
