@@ -17,7 +17,7 @@ class STClustering(object):
         sc.pp.neighbors(adata_clusters, use_rep=embedding_key)
 
         print("Performing clustering...")
-        sc.tl.leiden(adata_clusters, flavor="igraph", n_iterations=2, resolution=resolution)
+        sc.tl.leiden(adata_clusters, flavor="igraph", n_iterations=-1, resolution=resolution)
 
         np_clusters = adata_clusters.obs["leiden"].to_numpy().astype("int")
 

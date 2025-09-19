@@ -19,9 +19,6 @@ def shuffle_attributes(x, edge_index):
     permutation = torch.randperm(x.size(0))
     return x[permutation], edge_index
 
-def make_baseline_data(n_obs, n_vars):
-    return torch.zeros(n_obs, n_vars)
-
 class GCNDGIAELoss(nn.Module):
     def __init__(self, alpha, beta):
         super(GCNDGIAELoss, self).__init__()

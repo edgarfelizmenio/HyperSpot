@@ -1,3 +1,4 @@
+import logging
 import os
 import scanpy as sc
 import torch
@@ -5,12 +6,17 @@ import torch.optim as optim
 
 import lightning as L
 
+from pathlib import Path
+
 from lightning.pytorch import loggers
 from lightning.pytorch.callbacks import Callback, BasePredictionWriter, ModelCheckpoint
 
 from ..preprocessing import st
 from ..model.ae import GCNDGIAE, GCNDGIAELoss, graph_embedding, shuffle_attributes
 
+from .utils import TrainerStatusLogCallback
+
+logger = logging.getLogger(__name__)
 
 class GCNDGIAEEmbedder(L.LightningModule):
     def __init__(self,
@@ -56,9 +62,9 @@ class GCNDGIAEEmbedder(L.LightningModule):
 
         # sync_dist synchronizes the loss across all processes, 
         # which is important when saving and loading the best model
-        self.log('total loss', total_loss, sync_dist=True, prog_bar=True)
-        self.log('reconstruction loss', reconstruction_loss, sync_dist=True, prog_bar=True)
-        self.log('contrastive loss', contrastive_loss, sync_dist=True, prog_bar=True)
+        self.log('total_loss', total_loss, sync_dist=True, prog_bar=True)
+        self.log('reconstruction_loss', reconstruction_loss, sync_dist=True, prog_bar=True)
+        self.log('contrastive_loss', contrastive_loss, sync_dist=True, prog_bar=True)
  
         return total_loss
     
@@ -79,19 +85,6 @@ class GCNDGIAEEmbedder(L.LightningModule):
     
     def configure_optimizers(self):
         return optim.Adam(self.parameters(), lr=self.lr, weight_decay=1e-5)
-
-class PrintCallback(Callback):
-    def on_train_start(self, trainer, pl_module):
-        print(f"Process {trainer.global_rank}: Training...")
-
-    def on_train_end(self, trainer, pl_module):
-        print(f"Process {trainer.global_rank}: Done training.")
-
-    def on_predict_start(self, trainer, pl_module):
-        print(f"Process {trainer.global_rank}: Predicting...")
-
-    def on_predict_end(self, trainer, pl_module):
-        print(f"Process {trainer.global_rank}: Done predicting.")
 
 class BestCheckpointSync(Callback):
     """Broadcasts the best_model_path from rank 0 to all ranks at the end of training."""    
@@ -114,12 +107,11 @@ class BestCheckpointSync(Callback):
 
         self.best_checkpoint_path = path_list[0]
         if pl_module.global_rank == 0:
-            print(f"[Rank 0] Best checkpoint path synced: {self.best_checkpoint_path}")
+            logger.info(f"[Rank 0] Best checkpoint path synced: {self.best_checkpoint_path}")
     
 class EmbeddingWriter(BasePredictionWriter):
-    def __init__(self, output_dir, write_interval):
+    def __init__(self, write_interval):
         super(EmbeddingWriter, self).__init__(write_interval)
-        # self.output_dir = f"{output_dir}/embedding"
 
     def write_on_epoch_end(self, trainer, pl_module, predictions, batch_indices):
         
@@ -138,10 +130,10 @@ class EmbeddingWriter(BasePredictionWriter):
         torch.save(reconstruction, f"{self.output_dir}/{trainer.global_rank}_reconstruction.pt")
         
         trainer.strategy.barrier("write predictions")
-        print(f"Finished writing embedding from process {trainer.global_rank}")        
+        logger.info(f"Finished writing embedding from process {trainer.global_rank}")        
         if trainer.global_rank == 0:
-            print("Merging embedding...")
-            print(f"Number of processes: {trainer.world_size}")
+            logger.info("Merging embedding...")
+            logger.info(f"Number of processes: {trainer.world_size}")
 
             # load the results saved by each process
             node_id_list = [torch.load(f"{self.output_dir}/{i}_node_ids.pt") for i in range(trainer.world_size)]
@@ -166,7 +158,7 @@ class EmbeddingWriter(BasePredictionWriter):
             
             # save the new adata with embedding
             sc.write(f"{self.output_dir}/adata_embedding.h5ad", adata_embedding)
-            print(adata_embedding)
+            logger.debug(adata_embedding)
 
         # print(predictions_list)
 
@@ -194,17 +186,17 @@ class STEmbedding(object):
         self.checkpoint_callback = ModelCheckpoint(
             # dirpath=f"{self.output_dir}/checkpoints",
             filename='{epoch}-{total loss:.4f}',
-            monitor='total loss',
+            monitor='total_loss',
             save_top_k=10,
             mode='min',
             every_n_epochs=1,
             save_on_train_epoch_end=True,
-            save_weights_only=True,
+            # save_weights_only=True,
             auto_insert_metric_name=True)
         # self.checkpoint_sync_callback = BestCheckpointSync()
+        self.prediction_writer = EmbeddingWriter(write_interval="epoch")
     
     def configure_trainer(self):
-        prediction_writer = EmbeddingWriter(output_dir=self.output_dir, write_interval="epoch")
         self.trainer = L.Trainer(accelerator=self.accelerator,
                  max_epochs = self.num_epochs, 
                  devices = self.devices,
@@ -213,8 +205,8 @@ class STEmbedding(object):
                  num_nodes=self.num_nodes,
                  default_root_dir=self.output_dir,
                  logger=loggers.CSVLogger(f'{self.output_dir}', name='st_embedder'),
-                 callbacks=[prediction_writer, 
-                            PrintCallback(), 
+                 callbacks=[self.prediction_writer, 
+                            TrainerStatusLogCallback(logger), 
                             self.checkpoint_callback,
                             # self.checkpoint_sync_callback,
                            ])
@@ -228,13 +220,16 @@ class STEmbedding(object):
                      datamodule = datamodule)
 
         self.trainer.strategy.barrier("training end")        
-        print(f"Training finished. Best model score: {self.checkpoint_callback.best_model_score}. Path: {self.checkpoint_callback.best_model_path}")
-        print("Saving best models...")
-        # self.trainer.checkpoint_callback.to_yaml()
+        logger.info(f"Training finished. Best model score: {self.checkpoint_callback.best_model_score}. Path: {self.checkpoint_callback.best_model_path}")
 
+        # self.trainer.checkpoint_callback.to_yaml()
         for cb in self.trainer.callbacks:
             if hasattr(cb, "to_yaml"):
+                logger.info("Saving best models...")
                 cb.to_yaml()
+                best_model_path = Path(cb.best_model_path)
+                best_link_path = best_model_path.parent / "best.ckpt"
+                best_link_path.symlink_to(best_model_path)
                 # path_list[0] = cb.best_model_path
                 break
         
@@ -247,9 +242,10 @@ class STEmbedding(object):
 
         # ae = GCNDGIAE.load_from_checkpoint(f"{self.output_dir}/gatae_model.ckpt")
 
-        print("Predicting using best model...")
+        logger.info("Predicting using best model...")
         # best_ckpt_path = self.checkpoint_sync_callback.best_checkpoint_path
         best_ckpt_path = self.checkpoint_callback.best_model_path
-        self.trainer.predict(ckpt_path=best_ckpt_path, datamodule = datamodule, return_predictions=False)
+        self.trainer.predict(ckpt_path=best_ckpt_path, datamodule = datamodule, 
+                             return_predictions=False)
 
         self.trainer.strategy.barrier("prediction end")
