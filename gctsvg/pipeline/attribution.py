@@ -81,7 +81,7 @@ class StackedClassifier(L.LightningModule):
         self.explainer = Explainer(
             model=self,
             algorithm=self.explainer_algorithm,
-            explanation_type='model',
+            explanation_type='phenomenon',
             model_config=dict(
                 mode='multiclass_classification',
                 task_level='node',
