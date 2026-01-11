@@ -69,7 +69,7 @@ class HGCTSVGClustering(object):
             sc.pp.neighbors(adata_celltype, use_rep=embedding_key, metric='euclidean', knn=False, method='gauss')
             sc.tl.leiden(adata_celltype, flavor="igraph", n_iterations=-1, resolution=resolution)
             
-            adata_celltype.write_h5ad(self.output_dir / f"ST_{cell_type}.h5ad")
+            adata_celltype.write_h5ad(self.output_dir / f"ST_cell_{cell_type}.h5ad")
             
             cluster_results[cell_type] = adata_celltype.obs['leiden'].to_numpy(dtype=str) 
 

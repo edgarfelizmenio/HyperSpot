@@ -7,13 +7,14 @@ import torch.optim as optim
 import logging
 
 from collections import namedtuple
-from enum import Enum
 
 from pathlib import Path
 from tqdm import tqdm
 
 from torch.utils.data import DataLoader
 from torch.utils.data.sampler import BatchSampler, RandomSampler, SequentialSampler
+
+from .utils import get_device
 
 from ..data import STHypergraphData
 from ..dataset.hypergraph import STHypergraphMatrixDataset, STHypergraphBatchMatrixData
@@ -26,15 +27,9 @@ from ..model.cl.hyfi import HyFi, HyFiLoss
 # from ..model.cl.tricl import TriCL, TriCLLoss
 # from ..model.classifier import Classifier
 
-logger = logging.getLogger(__name__)
+from ..config import AcceleratorOptions
 
-# TODO:
-# apply DDP to parallelize operations
-# https://docs.pytorch.org/tutorials/intermediate/ddp_tutorial.html
-# 
-class AcceleratorOptions(str, Enum):
-    CPU = "cpu"
-    CUDA = "cuda"
+logger = logging.getLogger(__name__)
 
 # save node embeddings and hyperedge embeddings
 class STHypergraphEmbedder(object):
@@ -65,22 +60,7 @@ class STHypergraphEmbedder(object):
         self.__configure_optimizer()
     
     def __setup_model(self, accelerator: AcceleratorOptions):
-        if accelerator == AcceleratorOptions.CUDA:
-            n_devices = torch.cuda.device_count()
-            cuda_visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES")
-            if cuda_visible_devices:
-                device_ids = cuda_visible_devices.split(",")
-            else:
-                device_ids = list(range(n_devices))
-            for i, device_id in enumerate(device_ids):
-                print(f"device mapping: cuda:{i} -> {device_id}")
-            
-            if len(device_ids) > 1:
-                raise NotImplementedError("Multi-GPU support not implemented. Set CUDA_VISIBLE_DEVICES before running.")
-            else:
-                self.device = 'cuda:0'
-        else:
-            self.device = 'cpu'
+        self.device = get_device(accelerator)
         
         self.cl_model.to(self.device)
         self.criterion.to(self.device)

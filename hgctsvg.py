@@ -13,10 +13,11 @@ from tqdm.auto import tqdm
 from gctsvg.data import STHypergraphData
 from gctsvg.dataset.hypergraph import STHypergraphListDataset
 
-from gctsvg.pipeline import STHypergraphEmbedder, AcceleratorOptions, HGCTSVGClustering
+from gctsvg.pipeline import STHypergraphEmbedder, HGCTSVGClustering, load_sc_classifier_inputs, train_sc_embedding_classifiers
+from gctsvg.config import AcceleratorOptions
 
 app = App()
-    
+
 @dataclass
 class ModelArgs:
      input_dim: int
@@ -39,7 +40,13 @@ class ClusterArgs:
     resolution: float = 1.0
     # TODO: include leiden clustering options
 
-@app.command
+@dataclass
+class ClassifierArgs:
+    embedding_dim: int
+    num_layers: int = 3
+    
+
+@app.command(help="Fit a hypergraph model for making embeddings.")
 def train_embedder(project: str,
          model: ModelArgs,
          trainer: TrainerArgs):
@@ -60,7 +67,7 @@ def train_embedder(project: str,
                  trainer.batch_size,
                  trainer.accelerator)
 
-@app.command
+@app.command(help="Use the trained hypergraph model to generate the embeddings.")
 def make_embedding(project: str,
                    model: ModelArgs,
                    trainer: TrainerArgs):
@@ -76,7 +83,7 @@ def make_embedding(project: str,
                                 trainer.batch_size,
                                 trainer.accelerator)
 
-@app.command
+@app.command(help="Using hyperedge embeddings, find the spatial domains present in the Spatial Transcriptomics tissue.")
 def compute_spatial_domains(project:str,
                             embedding_key = "embedding",
                             clustering_args: ClusterArgs = ClusterArgs()):
@@ -91,7 +98,7 @@ def compute_spatial_domains(project:str,
                                         embedding_key, 
                                         clustering_args.resolution)
 
-@app.command
+@app.command(help="Using hypergraph node embeddings, find the spatial domains present for each cell type in the Spatial Transcriptomics tissue.")
 def compute_celltype_spatial_domains(project: str,
                              data: ClusterDataArgs,
                              clustering_args: ClusterArgs = ClusterArgs()):
@@ -109,7 +116,25 @@ def compute_celltype_spatial_domains(project: str,
                                                   data.cell_type_key,
                                                   data.embedding_key,
                                                   clustering_args.resolution)
+
+@app.command
+def train_classifier(project: str,
+                     classifier: ClassifierArgs,
+                     trainer: TrainerArgs):
+    project_dir = Path("hgctsvg_output") / project
     
-    
+    cell_types, cell_type_embeddings, cell_type_classes, cell_type_num_classes = load_sc_classifier_inputs(project_dir)
+
+    train_sc_embedding_classifiers(project_dir, 
+                                   classifier.embedding_dim,
+                                   cell_types,
+                                   cell_type_num_classes,
+                                   classifier.num_layers,
+                                   cell_type_embeddings,
+                                   cell_type_classes,
+                                   trainer.num_epochs,
+                                   trainer.batch_size,
+                                   trainer.accelerator)
+
 if __name__ == "__main__":
     app()

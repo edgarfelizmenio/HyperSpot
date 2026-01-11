@@ -1,42 +1,24 @@
-from pathlib import Path
+import os
+import torch
 
-from lightning.pytorch.callbacks import Callback
+from ..config import AcceleratorOptions
 
-# get the experiment run 
-def get_experiment_run(project_dir, task, version: str | int = "latest"):
-    run_dir = Path(project_dir) / task
-    
-    latest_dir = None
-    for d in run_dir.iterdir():
-        if d.is_dir() and d.name.startswith("version_"):
-            dir_ver = d.name.split("_")[1]
-            
-            if dir_ver.isdigit():
-                dir_ver = int(dir_ver)
-                if latest_dir is None or latest_dir < dir_ver:
-                    latest_dir = dir_ver
-                if isinstance(version, int) and version == dir_ver:
-                    return d
+def get_device(accelerator: AcceleratorOptions):
+    if accelerator == AcceleratorOptions.CUDA:
+        n_devices = torch.cuda.device_count()
+        cuda_visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES")
+        if cuda_visible_devices:
+            device_ids = cuda_visible_devices.split(",")
+        else:
+            device_ids = list(range(n_devices))
+        # for i, device_id in enumerate(device_ids):
+            # print(f"device mapping: cuda:{i} -> {device_id}")
+        
+        if len(device_ids) > 1:
+            raise NotImplementedError("Multi-GPU support not implemented. Set CUDA_VISIBLE_DEVICES before running.")
+        else:
+            device = 'cuda:0'
+    else:
+        device = 'cpu'
 
-    if version == "latest":
-        return d
-
-    return None
-
-class TrainerStatusLogCallback(Callback):
-    def __init__(self, logger):
-        super(TrainerStatusLogCallback, self).__init__()
-        self.logger = logger
-    
-    def on_train_start(self, trainer, pl_module):
-        self.logger.info(f"PROCESS {trainer.global_rank}: Training...")
-        print("training")
-    
-    def on_train_end(self, trainer, pl_module):
-        self.logger.info(f"PROCESS {trainer.global_rank}: Training finished.")
-
-    def on_predict_start(self, trainer, pl_module):
-        self.logger.info(f"PROCESS {trainer.global_rank}: Predicting...")
-
-    def on_predict_end(self, trainer, pl_module):
-        self.logger.info(f"PROCESS {trainer.global_rank}: Prediction finished.")
+    return device
