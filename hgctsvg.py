@@ -13,7 +13,7 @@ from tqdm.auto import tqdm
 from gctsvg.data import STHypergraphData
 from gctsvg.dataset.hypergraph import STHypergraphListDataset
 
-from gctsvg.pipeline import STHypergraphEmbedder, HGCTSVGClustering, load_sc_classifier_inputs, train_sc_embedding_classifiers
+from gctsvg.pipeline import STHypergraphEmbedder, HGCTSVGClustering, load_sc_classifier_inputs, load_sc_classifier_input, train_sc_embedding_classifiers, Explainer
 from gctsvg.config import AcceleratorOptions
 
 app = App()
@@ -44,7 +44,11 @@ class ClusterArgs:
 class ClassifierArgs:
     embedding_dim: int
     num_layers: int = 3
-    
+
+@dataclass
+class AttributionArgs:
+    n_steps: int = 1000
+    accelerator: AcceleratorOptions = AcceleratorOptions.CUDA
 
 @app.command(help="Fit a hypergraph model for making embeddings.")
 def train_embedder(project: str,
@@ -135,6 +139,27 @@ def train_classifier(project: str,
                                    trainer.num_epochs,
                                    trainer.batch_size,
                                    trainer.accelerator)
+
+@app.command(help="Given a classifier trained on embeddings, compute the attribution scores of each embedding dimension")
+def compute_cell_embedding_attributions(project:str,
+                                        cell_type: str,
+                                        classifier: ClassifierArgs,
+                                        attribution: AttributionArgs):
+    project_dir = Path("hgctsvg_output") / project
+
+    embeddings, classes, num_classes = load_sc_classifier_input(project_dir, cell_type)
+    
+    explainer = Explainer(project_dir)
+    explainer.compute_cell_type_spatial_embedding_attribution(cell_type,
+                                                              classifier.embedding_dim,
+                                                              classifier.num_layers,
+                                                              num_classes,
+                                                              embeddings,
+                                                              classes,
+                                                              attribution.n_steps,
+                                                              attribution.accelerator)
+    
+    
 
 if __name__ == "__main__":
     app()

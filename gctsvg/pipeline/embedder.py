@@ -71,6 +71,7 @@ class STHypergraphEmbedder(object):
             batch_size: int,
             accelerator: AcceleratorOptions):
         self.__setup_model(accelerator)
+        self.cl_model.train()
         # use random sampler in training
         logger.info("Learning node and hyperedge embeddings...")
 
@@ -97,7 +98,7 @@ class STHypergraphEmbedder(object):
                 with tqdm(hgloader, leave=False, position=1) as b_pbar:
                     for batch in b_pbar:
                         self.optimizer.zero_grad()
-                        loss = self.__step_batch(batch, train=True)
+                        loss = self.__step_batch(batch)
                         loss.backward()
                         self.optimizer.step()
                         epoch_loss += loss.item()
@@ -138,12 +139,11 @@ class STHypergraphEmbedder(object):
         self.optimizer = optim.Adam(list(self.cl_model.parameters()) + list(self.criterion.parameters()), lr=0.0001)
                 
     def __step_batch(self, 
-                     batch: namedtuple,
-                     train):
+                     batch: namedtuple):
         
         if hasattr(batch, 'subgraph_incidence_matrix'):
             subgraph_incidence_matrix = batch.subgraph_incidence_matrix.to(self.device)
-            if train:
+            if self.cl_model.training:
                 batch_incidence_matrix = batch.batch_incidence_matrix.to(self.device)
         else:
             incidence_matrix = build_incidence_matrix(batch.hyperedge_index.to(self.device))
@@ -157,7 +157,7 @@ class STHypergraphEmbedder(object):
         #     # batch.cell_types.to(self.device),
         #     incidence_matrix)      
 
-        if train:
+        if self.cl_model.training:
             node_embeddings, hyperedge_embeddings, augmented_node_embeddings, augmented_hyperedge_embeddings = self.cl_model(batch.node_feats.to(self.device), 
                                                                                                                              batch.batch_hyperedges.to(self.device),
                                                                                                                              subgraph_incidence_matrix)
@@ -183,6 +183,7 @@ class STHypergraphEmbedder(object):
                            accelerator: AcceleratorOptions):
         
         self.__setup_model(accelerator)
+        self.cl_model.eval()
 
         model_checkpoint = torch.load(self.project / 'embedder.pth', weights_only=True)
         cl_model_state = model_checkpoint['model_state_dict']
@@ -202,7 +203,7 @@ class STHypergraphEmbedder(object):
         node_id_batches = []
         hyperedge_id_batches = []
         for batch in tqdm(hgloader, leave=False, disable=True):
-            node_embedding_batch, hyperedge_embedding_batch = self.__step_batch(batch, train=False)
+            node_embedding_batch, hyperedge_embedding_batch = self.__step_batch(batch)
             node_embedding_batches.append(node_embedding_batch.detach().cpu())
             hyperedge_embedding_batches.append(hyperedge_embedding_batch.detach().cpu())
             node_id_batches.append(batch.batch_cells.detach().cpu())

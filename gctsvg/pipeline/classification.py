@@ -114,17 +114,24 @@ class SCEmbeddingSpatialClassifierTrainer(object):
         loss = self.criterion(batch_out, batch_y)
         return loss
 
+def load_sc_classifier_input(project: Path, 
+                             cell_type: str):
+    adata_cell_type = sc.read_h5ad(project / "clustering" / f"ST_cell_{cell_type}.h5ad")
+    
+    embeddings = torch.from_numpy(adata_cell_type.obsm["embedding"])
+    classes = torch.from_numpy(adata_cell_type.obs["leiden"].to_numpy(dtype=int))
+    num_classes = adata_cell_type.obs["leiden"].nunique()
+
+    return embeddings, classes, num_classes 
+
 def load_sc_classifier_inputs(project: Path):
     cell_types = np.loadtxt(project / "cell_types.txt", dtype=str)
     cell_type_embeddings = {}
     cell_type_classes = {}
     cell_type_num_classes = {}
     for cell_type in tqdm(cell_types, desc="Loading classifier input for each cell type..."):
-        adata_cell_type = sc.read_h5ad(project / "clustering" / f"ST_cell_{cell_type}.h5ad")
         
-        embeddings = torch.from_numpy(adata_cell_type.obsm["embedding"])
-        classes = torch.from_numpy(adata_cell_type.obs["leiden"].to_numpy(dtype=int))
-        num_classes = adata_cell_type.obs["leiden"].nunique()
+        embeddings, classes, num_classes = load_sc_classifier_input(project, cell_type)
         
         cell_type_embeddings[cell_type] = embeddings
         cell_type_classes[cell_type] = classes
