@@ -22,7 +22,8 @@ from ..dataset.hypergraph import STHypergraphMatrixDataset, STHypergraphBatchMat
 from ..utils import build_incidence_matrix
 
 # from ..model.hypergraph.transformer import STHypergraphTransformer
-from ..model.hypergraph.hgnn import HyFiHGNN
+# from ..model.hypergraph.hgnn import HyFiHGNN
+from ..model.hypergraph.fusion import SpatialFusionNetwork
 from ..model.cl.hyfi import HyFi, HyFiLoss
 # from ..model.cl.tricl import TriCL, TriCLLoss
 # from ..model.classifier import Classifier
@@ -49,7 +50,7 @@ class STHypergraphEmbedder(object):
         #     num_heads, 
         #     dropout=0.1
         # )
-        self.model = HyFiHGNN(
+        self.model = SpatialFusionNetwork(
             input_dim,
             embedding_dim,
             dropout=0.1

@@ -10,11 +10,11 @@ from typing import Optional
 from pathlib import Path
 from tqdm.auto import tqdm
 
-from gctsvg.data import STHypergraphData
-from gctsvg.dataset.hypergraph import STHypergraphListDataset
+from .data import STHypergraphData
+from .dataset.hypergraph import STHypergraphListDataset
 
-from gctsvg.pipeline import STHypergraphEmbedder, HGCTSVGClustering, load_sc_classifier_inputs, load_sc_classifier_input, train_sc_embedding_classifiers, Explainer
-from gctsvg.config import AcceleratorOptions
+from .pipeline import STHypergraphEmbedder, HGCTSVGClustering, load_sc_classifier_inputs, load_sc_classifier_input, train_sc_embedding_classifiers, Explainer
+from .config import AcceleratorOptions
 
 app = App()
 
@@ -159,7 +159,16 @@ def compute_cell_embedding_attributions(project:str,
                                                               attribution.n_steps,
                                                               attribution.accelerator)
     
-    
+@app.command(help="Check if project folder exists.")
+def folder_test(project:str):
+    project_dir = Path("hgctsvg_output") / project
+
+    if project_dir.exists():
+        print(f"Folder {project_dir} exists!")
+        for child in project_dir.iterdir(): 
+              print(f"\t{child}")
+    else:
+        print(f"Folder {project_dir} does not exist!")
 
 if __name__ == "__main__":
     app()
