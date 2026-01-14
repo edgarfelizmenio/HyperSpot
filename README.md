@@ -1,6 +1,13 @@
-# NNct-SVG
+# HG ct-SVG
 
-Neural network-based detection of cell type-specific spatially variable genes.
+Detection of cell type-specific spatially variable gene modules using Spatially-Informed Hypergraph based embeddings.
+
+## Installation
+### Development Mode
+Install hgctsvg package in editable mode using pip:
+  ```bash
+  pip install -e hgctsvg
+  ```
 
 ## Repository Management
 ### Commiting to submodule (STAMarker, SpatialScope)
