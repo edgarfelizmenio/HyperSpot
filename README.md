@@ -1,10 +1,17 @@
 # HG ct-SVG
 
-Detection of cell type-specific spatially variable gene modules using Spatially-Informed Hypergraph based embeddings.
+HGCTSVG: Detection of Cell Type-Specific Spatially Variable Gene Modules using Spatially-Informed Hypergraph Embeddings.
 
 ## Installation
+
+### Production Mode
+Install hgctsvg package using pip:
+  ```bash
+  pip install hgctsvg
+  ```
+  
 ### Development Mode
-Install hgctsvg package in editable mode using pip:
+Install in editable mode using pip:
   ```bash
   pip install -e hgctsvg
   ```
