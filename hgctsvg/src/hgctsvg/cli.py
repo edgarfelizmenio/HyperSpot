@@ -1,3 +1,4 @@
+
 import cyclopts
 import numpy as np
 import scanpy as sc
@@ -10,11 +11,12 @@ from typing import Optional, Annotated
 from pathlib import Path
 from tqdm.auto import tqdm
 
+from . import config
+
 from .data import STHypergraphData
 from .dataset.hypergraph import STHypergraphListDataset
 
 from .pipeline import STHypergraphEmbedder, HGCTSVGClustering, load_sc_classifier_inputs, load_sc_classifier_input, train_sc_embedding_classifiers, Explainer
-from .config import AcceleratorOptions
 
 app = App(name="hgctsvg")
 
@@ -25,7 +27,7 @@ class ProjectArgs:
 
     @property
     def project_dir(self):
-        return Path("hgctsvg_project_files") / self.name
+        return config.project_files_dir / self.name
 
 @dataclass
 class ModelArgs:
@@ -37,7 +39,7 @@ class ModelArgs:
 class TrainerArgs:
     num_epochs: int = 100
     batch_size: int = 8192
-    accelerator: AcceleratorOptions = AcceleratorOptions.CUDA    
+    accelerator: config.AcceleratorOptions = config.AcceleratorOptions.CUDA    
 
 @dataclass
 class ClusterDataArgs:
@@ -57,7 +59,7 @@ class ClassifierArgs:
 @dataclass
 class AttributionArgs:
     n_steps: int = 1000
-    accelerator: AcceleratorOptions = AcceleratorOptions.CUDA
+    accelerator: config.AcceleratorOptions = config.AcceleratorOptions.CUDA
 
 @app.command(help="Fit a hypergraph model for making embeddings.",
              sort_key=1)
@@ -176,5 +178,6 @@ def folder_test(project: ProjectArgs):
               print(f"\t{child}")
     else:
         print(f"Folder {project.project_dir} does not exist!")
+
 if __name__ == "__main__":
     app()
