@@ -61,8 +61,14 @@ class AttributionArgs:
     n_steps: int = 1000
     accelerator: config.AcceleratorOptions = config.AcceleratorOptions.CUDA
 
-@app.command(help="Fit a hypergraph model for making embeddings.",
+@app.command(help="Create a project files directory.",
              sort_key=1)
+def init_project_files_dir():
+    if not config.project_files_dir.exists():
+        config.project_files_dir.mkdir()
+
+@app.command(help="Fit a hypergraph model for making embeddings.",
+             sort_key=2)
 def train_embedder(project: ProjectArgs,
          model: ModelArgs,
          trainer: TrainerArgs):
@@ -71,7 +77,7 @@ def train_embedder(project: ProjectArgs,
 
     print("hyperedges: ", hypergraph["hyperedge_feats"].shape[0])
     
-    embedder = STHypergraphEmbedder(project_dir, 
+    embedder = STHypergraphEmbedder(project.project_dir, 
                                     model.input_dim,
                                     model.embedding_dim,
                                     model.dropout)
@@ -82,13 +88,13 @@ def train_embedder(project: ProjectArgs,
                  trainer.accelerator)
 
 @app.command(help="Use the trained hypergraph model to generate the embeddings.",
-             sort_key=2)
+             sort_key=3)
 def make_embedding(project: ProjectArgs,
                    model: ModelArgs,
                    trainer: TrainerArgs):
 
     hypergraph = STHypergraphData.load(project.project_dir)
-    embedder = STHypergraphEmbedder(project_dir, 
+    embedder = STHypergraphEmbedder(project.project_dir, 
                                     model.input_dim,
                                     model.embedding_dim,
                                     model.dropout)
@@ -98,13 +104,13 @@ def make_embedding(project: ProjectArgs,
                                 trainer.accelerator)
 
 @app.command(help="Using hyperedge embeddings, find the spatial domains present in the Spatial Transcriptomics tissue.",
-             sort_key=3)
+             sort_key=4)
 def compute_spatial_domains(project: ProjectArgs,
                             embedding_key = "embedding",
                             clustering_args: ClusterArgs = ClusterArgs()):
 
-    adata_st = sc.read_h5ad(project_dir / "ST_init.h5ad")
-    spot_embeddings = torch.load(project_dir / "hyperedge_embeddings.pth")
+    adata_st = sc.read_h5ad(project.project_dir / "ST_init.h5ad")
+    spot_embeddings = torch.load(project.project_dir / "hyperedge_embeddings.pth")
     adata_st.obsm[embedding_key] = spot_embeddings.numpy()
 
     clustering = HGCTSVGClustering(project.project_dir)
@@ -113,7 +119,7 @@ def compute_spatial_domains(project: ProjectArgs,
                                         clustering_args.resolution)
 
 @app.command(help="Using hypergraph node embeddings, find the spatial domains present for each cell type in the Spatial Transcriptomics tissue.",
-            sort_key=4)
+            sort_key=5)
 def compute_celltype_spatial_domains(project: ProjectArgs,
                              data: ClusterDataArgs,
                              clustering_args: ClusterArgs = ClusterArgs()):
@@ -132,7 +138,7 @@ def compute_celltype_spatial_domains(project: ProjectArgs,
                                                   clustering_args.resolution)
 
 @app.command(help="Fit a classifier that maps embedding features into cell type-specific spatial domains", 
-             sort_key=5)
+             sort_key=6)
 def train_celltype_domain_classifier(project: ProjectArgs,
                      classifier: ClassifierArgs,
                      trainer: TrainerArgs):
@@ -151,7 +157,7 @@ def train_celltype_domain_classifier(project: ProjectArgs,
                                    trainer.accelerator)
 
 @app.command(help="Given the trained classifier trained on embeddings, identify embedding dimensions that are highly attributed into each celltype-specific spatial domains.",
-             sort_key=6)
+             sort_key=7)
 def compute_cell_embedding_attributions(project: ProjectArgs,
                                         cell_type: str,
                                         classifier: ClassifierArgs,
@@ -170,7 +176,7 @@ def compute_cell_embedding_attributions(project: ProjectArgs,
                                                               attribution.accelerator)
 
 @app.command(help="Check if project folder exists.",
-             sort_key=7)
+             sort_key=8)
 def folder_test(project: ProjectArgs):
     if project.project_dir.exists():
         print(f"Folder {project.project_dir} exists!")

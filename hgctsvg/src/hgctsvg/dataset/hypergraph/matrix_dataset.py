@@ -79,14 +79,15 @@ class STHypergraphMatrixDataset(STHypergraphDataset):
         selected_hyperedges[two_hop_hyperedge_ids] = True
 
         # get the induced subgraph using the selected cells and hyperedges
-        subgraph_cells = torch.cat((initial_cell_ids, initial_hyperedge_cell_ids, one_hop_cell_ids)).squeeze()
-        subgraph_hyperedges = torch.cat((initial_hyperedge_ids, one_hop_hyperedge_ids, two_hop_hyperedge_ids)).squeeze()
+        # two-hop hyperedges are required for edge convolution
+        batch_subgraph_cells = torch.cat((initial_cell_ids, initial_hyperedge_cell_ids, one_hop_cell_ids)).squeeze()
+        batch_subgraph_hyperedges = torch.cat((initial_hyperedge_ids, one_hop_hyperedge_ids, two_hop_hyperedge_ids)).squeeze()
 
         # number of cells and hyperedges for gradient computation
-        n_cells = initial_cell_ids.shape[0]
-        n_hyperedges = initial_hyperedge_ids.shape[0]
-        cl_n_cells = n_cells + initial_hyperedge_cell_ids.shape[0]
-        cl_n_hyperedges = n_hyperedges + one_hop_hyperedge_ids.shape[0]
+        sample_n_cells = initial_cell_ids.shape[0]
+        sample_n_hyperedges = initial_hyperedge_ids.shape[0]
+        neighborhood_n_cells = sample_n_cells + initial_hyperedge_cell_ids.shape[0]
+        neighborhood_n_hyperedges = sample_n_hyperedges + one_hop_hyperedge_ids.shape[0]
         # subgraph_nodes = torch.cat((cell_ids, neighbor_node_ids))        
         # subgraph_edges = torch.cat((edge_ids, neighbor_edge_ids)).unique()
         # spot_expression = self.x_spot[subgraph_hyperedges]
@@ -99,26 +100,29 @@ class STHypergraphMatrixDataset(STHypergraphDataset):
         # if len(all_nodes) < node_sample_size, do not sample
         # sample node_sample_size - len(idx) from all_nodes / node_sample_size 
         
-        feats = self.cell_feats[subgraph_cells]
-        edge_feats = self.hyperedge_feats[subgraph_hyperedges]
-        cell_types = self.cell_types[initial_cell_ids]
+        batch_cell_feats = self.cell_feats[batch_subgraph_cells]
+        batch_hyperedge_feats = self.hyperedge_feats[batch_subgraph_hyperedges]
+        neighborhood_cell_types = self.cell_types[batch_subgraph_cells[:neighborhood_n_cells]]
         
-        subgraph_incidence_matrix = self.incidence_matrix[subgraph_cells][:, subgraph_hyperedges].to(torch.float)
-        cl_incidence_matrix = self.incidence_matrix[subgraph_cells[:cl_n_cells]][:, subgraph_hyperedges[:cl_n_hyperedges]].to(torch.float)
-        
+        batch_incidence_matrix = self.incidence_matrix[batch_subgraph_cells][:, batch_subgraph_hyperedges].to(torch.float)
+        neighborhood_incidence_matrix = self.incidence_matrix[batch_subgraph_cells[:neighborhood_n_cells]][:, batch_subgraph_hyperedges[:neighborhood_n_hyperedges]].to(torch.float)
+
         # TODO move remap on model
         # remapped_cells = hyperedge_index[0].unique(return_inverse=True)[1]
         # remapped_edges = hyperedge_index[1].unique(return_inverse=True)[1]
         # remapped_hyperedge_index = torch.stack((remapped_cells, remapped_edges))
-        
-        return STHypergraphBatchMatrixData(n_cells, 
-                                     n_hyperedges,
-                                     cl_n_cells,
-                                     cl_n_hyperedges,
-                                     subgraph_cells, 
-                                     subgraph_hyperedges, 
-                                     feats, 
-                                     edge_feats, 
-                                     cell_types, 
-                                     subgraph_incidence_matrix,
-                                     cl_incidence_matrix)
+
+        # sample_* -> initial indicated by batch_size parameter
+        # neigborhood_* -> immediate neighborhood of sample cells and hyperedges (used in computing contrastive loss)
+        # batch_* -> entire batch of cells and hyperedges using in forward pass
+        return STHypergraphBatchMatrixData(sample_n_cells, 
+                                     sample_n_hyperedges,
+                                     neighborhood_n_cells,
+                                     neighborhood_n_hyperedges,
+                                     batch_subgraph_cells, 
+                                     batch_subgraph_hyperedges, 
+                                     batch_cell_feats, 
+                                     batch_hyperedge_feats, 
+                                     neighborhood_cell_types, 
+                                     batch_incidence_matrix,
+                                     neighborhood_incidence_matrix)
