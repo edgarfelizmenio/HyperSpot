@@ -1,4 +1,4 @@
-from .embedder import STHypergraphEmbedder, AcceleratorOptions
+from .embedder import HypergraphEmbedderDriver, HypergraphEmbedderArgs
 from .clustering import HGCTSVGClustering
 from .classification import load_sc_classifier_inputs, load_sc_classifier_input, train_sc_embedding_classifiers
 from .explainer import Explainer

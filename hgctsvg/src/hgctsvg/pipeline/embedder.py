@@ -23,7 +23,7 @@ from ..utils import build_incidence_matrix
 
 # from ..model.hypergraph.transformer import STHypergraphTransformer
 # from ..model.hypergraph.hgnn import HyFiHGNN
-from ..model.hypergraph.fusion import HyFiHGNN, SpatialFusionNetwork
+from ..model.hypergraph import HypergraphEmbedder, HypergraphEmbedderArgs
 from ..model.cl.hyfi import HyFi, HyFiLoss, IntraClassContrastiveLoss
 # from ..model.cl.tricl import TriCL, TriCLLoss
 # from ..model.classifier import Classifier
@@ -33,13 +33,11 @@ from ..config import AcceleratorOptions
 logger = logging.getLogger(__name__)
 
 # save node embeddings and hyperedge embeddings
-class STHypergraphEmbedder(object):
+class HypergraphEmbedderDriver(object):
     def __init__(self, 
                  project: Path,
-                 input_dim,
-                 embedding_dim,
-                 dropout,
                  sigma=1):
+        
         self.project = project
       
         logger.info("Initializing model...")
@@ -50,30 +48,38 @@ class STHypergraphEmbedder(object):
         #     num_heads, 
         #     dropout=0.1
         # )
-        self.model = HyFiHGNN(
-            input_dim,
-            embedding_dim,
-            dropout=0.1
-        )
-
-        self.cl_model = HyFi(self.model, embedding_dim)
-        # self.criterion = HyFiLoss(embedding_dim)
-        self.criterion = IntraClassContrastiveLoss(embedding_dim)
-        self.__configure_optimizer()
-    
-    def __setup_model(self, accelerator: AcceleratorOptions):
-        self.device = get_device(accelerator)
         
-        self.cl_model.to(self.device)
-        self.criterion.to(self.device)
+        # self.model = HyFiHGNN(
+        #     input_dim,
+        #     embedding_dim,
+        #     dropout=0.1
+        # )
     
+    def __setup_model(self, 
+                      args: HypergraphEmbedderArgs, 
+                      accelerator: AcceleratorOptions):
+        
+        self.device = get_device(accelerator)
+
+        self.model = HypergraphEmbedder.build(self.project, args)
+        self.cl_model = HyFi(self.model, args.embedding_dim) 
+        self.cl_model.to(self.device)
+        
     def fit(self, 
             hypergraph: STHypergraphData,
+            embedder_args: HypergraphEmbedderArgs,
             num_epochs: int,
             batch_size: int,
             accelerator: AcceleratorOptions):
-        self.__setup_model(accelerator)
+
+        self.__setup_model(embedder_args,
+                           accelerator)
+        self.criterion = IntraClassContrastiveLoss(embedder_args.embedding_dim)
+        self.__configure_optimizer()
+        self.criterion.to(self.device)
+        
         self.cl_model.train()
+        
         # use random sampler in training
         logger.info("Learning node and hyperedge embeddings...")
 
@@ -88,6 +94,7 @@ class STHypergraphEmbedder(object):
             batch_size=batch_size,
             drop_last=False
         )
+        
         hgloader = DataLoader(hgdataset, sampler=hgtrainsampler, batch_size=None)
 
         with tqdm(range(num_epochs)) as e_pbar:
@@ -116,6 +123,7 @@ class STHypergraphEmbedder(object):
                                             'nodes': num_nodes,
                                             'hyperedges': num_hyperedges})
                         gc.collect()
+                        
                 epoch_loss /= num_batches
 
                 # TODO save best model
@@ -125,11 +133,12 @@ class STHypergraphEmbedder(object):
                     min_epoch_loss = epoch_loss
                     checkpoint = {
                         'epoch': epoch,
-                        'model_state_dict': copy.deepcopy(self.cl_model.state_dict()),
+                        'embedder_state_dict': copy.deepcopy(self.model.state_dict()),
+                        'criterion_state_dict': copy.deepcopy(self.criterion.state_dict()),
                         'optimizer_state_dict': self.optimizer.state_dict(),
                         'loss': min_epoch_loss
                     }
-                    torch.save(checkpoint, self.project / 'embedder.pth')
+                    torch.save(checkpoint, self.project / f'{self.model.checkpoint_name()}.pth')
 
                 e_pbar.set_postfix({
                     'epoch_loss': epoch_loss, 
@@ -140,49 +149,41 @@ class STHypergraphEmbedder(object):
     def __configure_optimizer(self):
         self.optimizer = optim.Adam(list(self.cl_model.parameters()) + list(self.criterion.parameters()), lr=0.0001)
                 
-    def __step_batch(self, 
-                     batch: namedtuple):
+    def __step_batch(self, batch: STHypergraphBatchMatrixData):
 
-        if hasattr(batch, 'batch_incidence_matrix'):
-            batch_incidence_matrix = batch.batch_incidence_matrix.to(self.device)
-            if self.cl_model.training:
-                neighborhood_incidence_matrix = batch.neighborhood_incidence_matrix.to(self.device)
-        else:
-            batch_incidence_matrix = build_incidence_matrix(batch.batch_incidence_matrix.to(self.device))
-        
+        batch = batch.to_device(self.device)        
 
         if self.cl_model.training:
-            node_embeddings, hyperedge_embeddings, augmented_node_embeddings, augmented_hyperedge_embeddings = self.cl_model(batch.batch_cell_feats.to(self.device), 
-                                                                                                                             batch.batch_subgraph_hyperedges.to(self.device),
-                                                                                                                             batch_incidence_matrix)
+            (node_embeddings, 
+             hyperedge_embeddings, 
+             augmented_node_embeddings, 
+             augmented_hyperedge_embeddings) = self.cl_model(batch)
+
             contrastive_loss = self.criterion(node_embeddings[:batch.neighborhood_n_cells], 
                                               hyperedge_embeddings[:batch.neighborhood_n_hyperedges], 
                                               augmented_node_embeddings[:,:batch.neighborhood_n_cells],
                                               augmented_hyperedge_embeddings[:,:batch.neighborhood_n_hyperedges], 
-                                              neighborhood_incidence_matrix,
-                                              batch.neighborhood_cell_types.to(self.device),
+                                              batch.neighborhood_incidence_matrix,
+                                              batch.batch_neighborhood_cell_types,
                                               batch.sample_n_cells,
                                               batch.sample_n_hyperedges)
-            return contrastive_loss
-        else:
-            node_embeddings, hyperedge_embeddings = self.model(batch.batch_cell_feats.to(self.device),
-                                                               batch_incidence_matrix)
-            return node_embeddings, hyperedge_embeddings
             
-
-        # suppose hyperedge_feats are derived from node feats (eg., average pooling). In a contrastive learning scheme where node augmentations are performed by adding a random noise to nodes, is it also necessary to update hyperedge feats?
+            return contrastive_loss
+        
+        else:
+            node_embeddings, hyperedge_embeddings = self.model(batch)
+            
+            return node_embeddings, hyperedge_embeddings
         
     def generate_embedding(self,
                            hypergraph: STHypergraphData,
+                           embedder_args: HypergraphEmbedderArgs,
                            batch_size: int,
                            accelerator: AcceleratorOptions):
         
-        self.__setup_model(accelerator)
+        self.__setup_model(embedder_args, accelerator)
+        self.model.load_checkpoint(self.project)
         self.cl_model.eval()
-
-        model_checkpoint = torch.load(self.project / 'embedder.pth', weights_only=True)
-        cl_model_state = model_checkpoint['model_state_dict']
-        self.cl_model.load_state_dict(cl_model_state)
         
         hgdataset = STHypergraphMatrixDataset(hypergraph)
         
@@ -225,4 +226,7 @@ class STHypergraphEmbedder(object):
         print(node_embeddings.shape, hyperedge_embeddings.shape)
         torch.save(node_embeddings, self.project / "node_embeddings.pth")
         torch.save(hyperedge_embeddings, self.project / "hyperedge_embeddings.pth")
-        
+
+    @classmethod
+    def get_available_embedders(cls):
+        return HypergraphEmbedder.get_available_embedders()

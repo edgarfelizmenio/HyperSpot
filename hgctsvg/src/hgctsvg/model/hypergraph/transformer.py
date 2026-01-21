@@ -5,6 +5,8 @@ import torch.nn.functional as F
 
 from einops import rearrange, repeat
 
+from . import HypergraphEmbedder, HypergraphEmbedderArgs
+
 class IntraMA(nn.Module):
     # IntraMA - hyperedges are queriesw
     def __init__(self, input_dim, embedding_dim, num_heads, dropout):
@@ -136,7 +138,7 @@ class STHypergraphTransformerBlock(nn.Module):
         return node_embeddings, hyperedge_embeddings     
 
 class STHypergraphTransformer(nn.Module):
-    def __init__(self, input_dim, embedding_dim, num_hyperedges, num_heads, num_layers=1, dropout=0.1, hyperedge_feats="pool"):
+    def __init__(self, input_dim, embedding_dim, num_heads, num_layers=1, dropout=0.1, hyperedge_feats="pool", num_hyperedges=1):
         super(STHypergraphTransformer, self).__init__()
         self.hyperedge_feats = hyperedge_feats
         if self.hyperedge_feats == "learned":
@@ -216,3 +218,39 @@ class STHypergraphTransformer(nn.Module):
 # 1. cell contrastive loss -> cells of the same type must be closer to each other 
 # 2. spatial loss -> adjacent cells must be more similar to each other
 # 3. spot contrastive loss -> adjacent spots must be closer to each other
+
+@HypergraphEmbedder.register("HGTransformerEmbedder")
+class HGTransformerEmbedder(HypergraphEmbedder):
+
+    @classmethod
+    def _build_impl(cls, args: HypergraphEmbedderArgs):
+        model = STHypergraphTransformer(
+            args.input_dim,
+            args.embedding_dim,
+            args.num_heads,
+            args.num_blocks,
+            args.dropout,
+            args.hyperedge_feats,
+            args.num_hyperedges
+        )
+        
+        return cls(model)
+
+    @classmethod
+    def checkpoint_name(cls) -> str:
+        return "HGTransformerEmbedder"
+
+    def forward(self, batch):
+        feats = batch.batch_cell_feats
+        hyperedges = batch.batch_subgraph_hyperedges
+        incidence_matrix = batch.batch_incidence_matrix
+        return self.model(feats, hyperedges, incidence_matrix)
+
+    def get_attribution_forward(self):
+        def attribution_forward(self, feats, hyperedges, incidence_matrix):
+            return self.model(feats, hyperedges, incidence_matrix)[0]
+
+    def get_attribution_inputs(self, batch):
+        inputs = batch.batch_cell_feats
+        additional_forward_args = (batch.batch_subgraph_hyperedges, batch.batch_incidence_matrix,)
+        return inputs, additional_forward_args

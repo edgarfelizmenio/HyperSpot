@@ -16,7 +16,7 @@ from . import config
 from .data import STHypergraphData
 from .dataset.hypergraph import STHypergraphListDataset
 
-from .pipeline import STHypergraphEmbedder, HGCTSVGClustering, load_sc_classifier_inputs, load_sc_classifier_input, train_sc_embedding_classifiers, Explainer
+from .pipeline import HypergraphEmbedderDriver, HypergraphEmbedderArgs, HGCTSVGClustering, load_sc_classifier_inputs, load_sc_classifier_input, train_sc_embedding_classifiers, Explainer
 
 app = App(name="hgctsvg")
 
@@ -30,11 +30,15 @@ class ProjectArgs:
         return config.project_files_dir / self.name
 
 @dataclass
-class ModelArgs:
-     input_dim: Annotated[int, Parameter(help="Number of input features.")]
-     embedding_dim: Annotated[int, Parameter(help="Size of embedding.")]
-     dropout: Annotated[float, Parameter(help="Dropout parameter.")] = 0.1
-
+class EmbedderArgs:
+    model_name: Annotated[str, Parameter(help=f"Name of hypergraph embedder to use. Possible values: {HypergraphEmbedderDriver.get_available_embedders()}")]
+    input_dim: Annotated[int, Parameter(help="Number of input features.")]
+    embedding_dim: Annotated[int, Parameter(help="Size of embedding.")]
+    dropout: Annotated[Optional[float], Parameter(help="Dropout parameter.")] = 0.1
+    num_heads: Annotated[Optional[int], Parameter(help="Number of attention heads (for transformers only).")] = None
+    num_blocks: Annotated[Optional[int], Parameter(help="Number of transformer blocks (for transformers only).")] = None
+    output_dim: Annotated[Optional[int], Parameter(help="Size of fused embedding (for fusion embedders only).")] = None
+    
 @dataclass
 class TrainerArgs:
     num_epochs: int = 100
@@ -70,19 +74,19 @@ def init_project_files_dir():
 @app.command(help="Fit a hypergraph model for making embeddings.",
              sort_key=2)
 def train_embedder(project: ProjectArgs,
-         model: ModelArgs,
+         model: EmbedderArgs,
          trainer: TrainerArgs):
 
     hypergraph = STHypergraphData.load(project.project_dir)
 
     print("hyperedges: ", hypergraph["hyperedge_feats"].shape[0])
+    print(vars(model))
     
-    embedder = STHypergraphEmbedder(project.project_dir, 
-                                    model.input_dim,
-                                    model.embedding_dim,
-                                    model.dropout)
+    embedder = HypergraphEmbedderDriver(project.project_dir, 
+                                    HypergraphEmbedderArgs(**vars(model)))
     
-    embedder.fit(hypergraph, 
+    embedder.fit(hypergraph,
+                 HypergraphEmbedderArgs(**vars(model)),
                  trainer.num_epochs, 
                  trainer.batch_size,
                  trainer.accelerator)
@@ -90,16 +94,14 @@ def train_embedder(project: ProjectArgs,
 @app.command(help="Use the trained hypergraph model to generate the embeddings.",
              sort_key=3)
 def make_embedding(project: ProjectArgs,
-                   model: ModelArgs,
+                   model: EmbedderArgs,
                    trainer: TrainerArgs):
 
     hypergraph = STHypergraphData.load(project.project_dir)
-    embedder = STHypergraphEmbedder(project.project_dir, 
-                                    model.input_dim,
-                                    model.embedding_dim,
-                                    model.dropout)
-    
+    embedder = HypergraphEmbedderDriver(project.project_dir)
+
     embedder.generate_embedding(hypergraph,
+                                HypergraphEmbedderArgs(**vars(model)),
                                 trainer.batch_size,
                                 trainer.accelerator)
 
@@ -127,7 +129,7 @@ def compute_celltype_spatial_domains(project: ProjectArgs,
     adata_decomp = sc.read_h5ad(project.project_dir / "ST_decomposition.h5ad")
     embedding = torch.load(project.project_dir / "node_embeddings.pth")
     type_list = np.loadtxt(project.project_dir / "cell_types.txt", dtype=str)
-
+ 
     adata_decomp.obsm[data.embedding_key] = embedding.numpy()
     
     clustering = HGCTSVGClustering(project.project_dir)

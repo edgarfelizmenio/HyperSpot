@@ -11,6 +11,11 @@ class AcceleratorOptions(str, Enum):
     CPU = "cpu"
     CUDA = "cuda"
 
+class ClassifierMode(str, Enum):
+    TRAIN = "train"
+    ATTR = "attr"
+    
+
 # appdirs, configparser
 config_path = Path(__file__).parent / 'settings.ini'
 

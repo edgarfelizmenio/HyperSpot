@@ -3,6 +3,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from . import HypergraphEmbedder, HypergraphEmbedderArgs
+
 class HyFiHGNN(nn.Module):
     def __init__(self, input_dim, embedding_dim, dropout = 0.1):
         super(HyFiHGNN, self).__init__()
@@ -38,3 +40,33 @@ class HyFiHGNN(nn.Module):
         node_embeddings = self.act(node_embeddings)        
 
         return node_embeddings, hyperedge_embeddings
+
+@HypergraphEmbedder.register("HyFiEmbedder")
+class HyFiEmbedder(HypergraphEmbedder):
+
+    @classmethod
+    def _build_impl(cls, args: HypergraphEmbedderArgs):
+        model = HyFiHGNN(
+            args.input_dim,
+            args.embedding_dim,
+            args.dropout
+        )
+        return cls(model)
+
+    def forward(self, batch):
+        feats = batch.batch_cell_feats
+        incidence_matrix = batch.batch_incidence_matrix
+        return self.model(feats, incidence_matrix)
+
+    @classmethod
+    def checkpoint_name(cls) -> str:
+        return "HyFiEmbedder"
+
+    def get_attribution_forward(self):
+        def attribution_forward(self, feats, incidence_matrix):
+            return self.model(feats, incidence_matrix)[0]
+
+    def get_attribution_inputs(self, batch):
+        inputs = batch.batch_cell_feats
+        additional_forward_args = (batch.batch_incidence_matrix,)
+        return inputs, additional_forward_args

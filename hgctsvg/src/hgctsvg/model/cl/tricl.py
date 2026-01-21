@@ -155,31 +155,20 @@ class TriCL(nn.Module):
     
         return im_masked    
     
-    def forward(self, node_feats, hyperedge_ids, incidence_matrix):
+    def forward(self, batch):
         # forward on original data
-        node_embeddings, hyperedge_embeddings = self.encoder(node_feats, 
-                                                             hyperedge_ids, 
-                                                             incidence_matrix)
+        node_embeddings, hyperedge_embeddings = self.encoder(batch)
         # make multiple views
         augmented_node_embeddings = torch.zeros((2, node_feats.shape[0], node_feats.shape[1])).to(node_feats.device)
         augmented_hyperedge_embeddings = torch.zeros((2, hyperedge_ids.shape[0], node_feats.shape[1])).to(node_feats.device)
         # forward on data with noise
+        orig_node_feats = batch.batch_cell_feats
+        orig_incidence_matrix = batch.batch_incidence_matrix
         for i in range(2):
-            perturbed_node_feats = self.__drop_node_feats(node_feats)
-            perturbed_incidence_matrix = self.__drop_node_membership(incidence_matrix)
-            augmented_node_embeddings[i], augmented_hyperedge_embeddings[i] = self.encoder(perturbed_node_feats,
-                                                                                           hyperedge_ids,
-                                                                                           perturbed_incidence_matrix)
+            batch.batch_cell_feats = self.__drop_node_feats(orig_node_feats)
+            batch.batch_incidence_matrix = self.__drop_node_membership(orig_incidence_matrix)
+            augmented_node_embeddings[i], augmented_hyperedge_embeddings[i] = self.encoder(batch)
         
         return node_embeddings, hyperedge_embeddings, augmented_node_embeddings, augmented_hyperedge_embeddings
-            
-        # total_contrastive_loss = HyFiLoss(node_embeddings, 
-        #                                   hyperedge_embeddings, 
-        #                                   augmented_node_embeddings, 
-        #                                   augmented_hyperedge_embeddings)
-
-
-        
-        # return total_contrastive_loss
     
     

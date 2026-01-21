@@ -3,10 +3,14 @@ import numpy as np
 import  torch
 
 from pathlib import Path
+from typing import List
 
 from captum.attr import IntegratedGradients
 
+from ..data import STHypergraphData
+
 from ..model.classifier import EmbeddingClassifier
+from ..model.hypergraph import HypergraphEmbedder, HypergraphEmbedderArgs
 
 from ..config import AcceleratorOptions
 from .utils import get_device
@@ -69,13 +73,36 @@ class Explainer(object):
         
         np.save(self.output_dir / f"attributions_{cell_type}.npy", mean_attr_per_label) 
      
-    def compute_cell_type_spatial_metagene_component_attribution(self, index):
-        
-        # Use captum.attr.NeuronIntegratedGradients
-        pass
+    def compute_cell_type_spatial_embedding_component_attribution(self,
+                                                                  hypergraph: STHypergraphData,
+                                                                  args: HypergraphEmbedderArgs,
+                                                                  component_idx: List[int],
+                                                                  batch_size: int,
+                                                                  n_steps: int,
+                                                                  attr_batch_size: int,
+                                                                  accelerator: AcceleratorOptions):
 
+        self.device = get_device(accelerator)
+        self.embedder = HypergraphEmbedder.build(self.project, args)
+        self.embedder.load_checkpoint(self.project)
+        self.embedder.to(self.device)
+        self.embedder.eval()
 
+        forward_fn = self.embedder.get_attribution_forward()
 
+        with tqdm(component_idx) as component_pbar:
+            for idx in componend_pbar:
+                with tqdm(dataloader) as batch_pbar:
+                    for batch in batch_pbar:
+                        batch = batch.to_device(self.device)
+                        inputs, additional_forward_args = self.embedder.get_attribution_inputs(batch)
+                        attr_idx = ig.attribute(inputs,
+                                                target=idx,
+                                                n_steps=n_steps,
+                                                internal_batch_size=attr_batch_size,
+                                                additional_forward_args = additional_forward_args)
+                # TODO save attribution score for component of each batch
+            # TODO save attribution scores for each component
 
 def find_representative_embeddings(embeddings):
     # compute centroid (mean embedding)

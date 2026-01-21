@@ -4,6 +4,8 @@ import torch.nn as nn
 
 from tqdm import tqdm
 
+from collections import namedtuple
+
 class HyFiLoss(nn.Module):
     def __init__(self, 
                  input_dim,
@@ -450,24 +452,28 @@ class HyFi(nn.Module):
         aug_feats = torch.where(node_feats - noise < 0, node_feats + noise, node_feats - noise)
         return aug_feats
     
-    def forward(self, node_feats, hyperedge_ids, incidence_matrix):
+    def forward(self, batch):
         # forward on original data
         # node_embeddings, hyperedge_embeddings = self.encoder(node_feats, 
         #                                                      hyperedge_ids, 
         #                                                      incidence_matrix)
-        node_embeddings, hyperedge_embeddings = self.encoder(node_feats, incidence_matrix)
+        node_embeddings, hyperedge_embeddings = self.encoder(batch)
         
         # make multiple views
-        augmented_node_embeddings = torch.zeros((self.num_views, node_feats.shape[0], self.embedding_dim)).to(node_feats.device)
-        augmented_hyperedge_embeddings = torch.zeros((self.num_views, hyperedge_ids.shape[0], self.embedding_dim)).to(node_feats.device)
+        augmented_node_embeddings = torch.zeros((self.num_views, batch.batch_subgraph_cells.shape[0], self.embedding_dim)).to(batch.batch_cell_feats.device)
+        augmented_hyperedge_embeddings = torch.zeros((self.num_views, batch.batch_subgraph_hyperedges.shape[0], self.embedding_dim)).to(batch.batch_cell_feats.device)
         # forward on data with noise
+        orig_node_feats = batch.batch_cell_feats
         for i in range(self.num_views):
-            perturbed_node_feats = self.__add_gaussian_noise(node_feats)
+            perturbed_cell_feats = self.__add_gaussian_noise(orig_node_feats)
+            
             # augmented_node_embeddings[i], augmented_hyperedge_embeddings[i] = self.encoder(perturbed_node_feats,
             #                                                                                hyperedge_ids,
             #                                                                                incidence_matrix)
-            augmented_node_embeddings[i], augmented_hyperedge_embeddings[i] = self.encoder(perturbed_node_feats,
-                                                                                           incidence_matrix)
+            augmented_node_embeddings[i], augmented_hyperedge_embeddings[i] = self.encoder(namedtuple("Batch", 
+                                                                                                      ["batch_cell_feats", 
+                                                                                                        "batch_incidence_matrix"])(perturbed_cell_feats,
+                                                                                                                                   batch.batch_incidence_matrix))
 
 
         
