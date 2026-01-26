@@ -9,19 +9,19 @@ from . import HypergraphEmbedder, HypergraphEmbedderArgs
 
 class IntraMA(nn.Module):
     # IntraMA - hyperedges are queriesw
-    def __init__(self, input_dim, embedding_dim, num_heads, dropout):
+    def __init__(self, input_dim, latent_dim, embedding_dim, num_heads, dropout):
         super(IntraMA, self).__init__()
         self.num_heads = num_heads
         
         self.norm_hyperedge = nn.LayerNorm(input_dim)
         self.norm_node = nn.LayerNorm(input_dim)
         
-        self.hyperedge_query_linear = nn.Linear(input_dim, embedding_dim * num_heads, bias=False)
-        self.node_key_linear = nn.Linear(input_dim, embedding_dim * num_heads, bias=False)
-        self.node_value_linear = nn.Linear(input_dim, embedding_dim * num_heads, bias=False)
+        self.hyperedge_query_linear = nn.Linear(input_dim, latent_dim * num_heads, bias=False)
+        self.node_key_linear = nn.Linear(input_dim, latent_dim * num_heads, bias=False)
+        self.node_value_linear = nn.Linear(input_dim, latent_dim * num_heads, bias=False)
 
-        self.scale = embedding_dim ** 0.5
-        self.to_out = nn.Linear(embedding_dim * num_heads + input_dim, input_dim)
+        self.scale = latent_dim ** 0.5
+        self.to_out = nn.Linear(latent_dim * num_heads + input_dim, embedding_dim)
         self.dropout = nn.Dropout(dropout)
         self.act = nn.SiLU()
     
@@ -64,19 +64,19 @@ class IntraMA(nn.Module):
 
 class InterMA(nn.Module):
     # InterMA - hyperedges are keys and values
-    def __init__(self, input_dim, embedding_dim, num_heads, dropout):
+    def __init__(self, input_dim, latent_dim, embedding_dim, num_heads, dropout):
         super(InterMA, self).__init__()
         self.num_heads = num_heads
         
         self.norm_node = nn.LayerNorm(input_dim)
         self.norm_hyperedge = nn.LayerNorm(input_dim)
 
-        self.node_query_linear = nn.Linear(input_dim, embedding_dim * num_heads, bias=False)
-        self.hyperedge_key_linear = nn.Linear(input_dim, embedding_dim * num_heads, bias=False)
-        self.hyperedge_value_linear = nn.Linear(input_dim, embedding_dim * num_heads, bias=False)
+        self.node_query_linear = nn.Linear(input_dim, latent_dim * num_heads, bias=False)
+        self.hyperedge_key_linear = nn.Linear(input_dim, latent_dim * num_heads, bias=False)
+        self.hyperedge_value_linear = nn.Linear(input_dim, latent_dim * num_heads, bias=False)
         
-        self.scale = embedding_dim ** 0.5
-        self.to_out = nn.Linear(embedding_dim * num_heads + input_dim, input_dim)
+        self.scale = latent_dim ** 0.5
+        self.to_out = nn.Linear(latent_dim * num_heads + input_dim, embedding_dim)
         self.dropout = nn.Dropout(dropout)
         self.act = nn.SiLU()
     
@@ -108,11 +108,11 @@ class InterMA(nn.Module):
         return final_output
 
 class MutualAttention(nn.Module):
-    def __init__(self, input_dim, embedding_dim, num_heads, dropout):
+    def __init__(self, input_dim, latent_dim, embedding_dim, num_heads, dropout):
         super(MutualAttention, self).__init__()
         
-        self.intraMA = IntraMA(input_dim, embedding_dim, num_heads, dropout)
-        self.interMA = InterMA(input_dim, embedding_dim, num_heads, dropout)
+        self.intraMA = IntraMA(input_dim, latent_dim, embedding_dim, num_heads, dropout)
+        self.interMA = InterMA(input_dim, latent_dim, embedding_dim, num_heads, dropout)
 
     def forward(self, node_embeddings, hyperedge_embeddings, incidence_matrix):
         hyperedge_embeddings = self.intraMA(hyperedge_embeddings, node_embeddings, incidence_matrix)
@@ -121,10 +121,10 @@ class MutualAttention(nn.Module):
         return node_embeddings, hyperedge_embeddings
 
 class STHypergraphTransformerBlock(nn.Module):
-    def __init__(self, input_dim, embedding_dim, num_heads, dropout):
+    def __init__(self, input_dim, latent_dim, embedding_dim, num_heads, dropout):
         super(STHypergraphTransformerBlock, self).__init__()
         
-        self.MA = MutualAttention(input_dim, embedding_dim, num_heads, dropout)
+        self.MA = MutualAttention(input_dim, latent_dim, embedding_dim, num_heads, dropout)
     
     def forward(self, node_input_embeddings, hyperedge_input_embeddings, incidence_matrix):
         
@@ -138,7 +138,7 @@ class STHypergraphTransformerBlock(nn.Module):
         return node_embeddings, hyperedge_embeddings     
 
 class STHypergraphTransformer(nn.Module):
-    def __init__(self, input_dim, embedding_dim, num_heads, num_layers=1, dropout=0.1, hyperedge_feats="pool", num_hyperedges=1):
+    def __init__(self, input_dim, latent_dim, embedding_dim, num_heads, num_layers=1, dropout=0.1, hyperedge_feats="pool", num_hyperedges=1):
         super(STHypergraphTransformer, self).__init__()
         self.hyperedge_feats = hyperedge_feats
         if self.hyperedge_feats == "learned":
@@ -147,7 +147,7 @@ class STHypergraphTransformer(nn.Module):
         else:
             print("Hyperedge Features: Pooled")
         
-        self.layers = nn.ModuleList([STHypergraphTransformerBlock(input_dim, embedding_dim, num_heads, dropout) for i in range(num_layers)])
+        self.layers = nn.ModuleList([STHypergraphTransformerBlock(input_dim, latent_dim, embedding_dim, num_heads, dropout) for i in range(num_layers)])
 
     def __pool_embedding(self, node_embeddings, incidence_matrix):
         hyperedge_embeddings = (incidence_matrix.t() @ node_embeddings) / incidence_matrix.sum(dim=0).unsqueeze(dim=1)
@@ -226,6 +226,7 @@ class HGTransformerEmbedder(HypergraphEmbedder):
     def _build_impl(cls, args: HypergraphEmbedderArgs):
         model = STHypergraphTransformer(
             args.input_dim,
+            args.latent_dim,
             args.embedding_dim,
             args.num_heads,
             args.num_blocks,

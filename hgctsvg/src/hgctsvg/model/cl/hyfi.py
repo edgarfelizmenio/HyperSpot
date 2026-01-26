@@ -237,7 +237,7 @@ class IntraClassContrastiveLoss(nn.Module):
                  projection_dim = 100,
                  temp_node = 0.5,
                  temp_hyperedge = 0.5,
-                 alpha=1.0):
+                 alpha=0.0):
         super(IntraClassContrastiveLoss, self).__init__()
         # alpha is the edge_loss weight
 
@@ -463,17 +463,12 @@ class HyFi(nn.Module):
         augmented_node_embeddings = torch.zeros((self.num_views, batch.batch_subgraph_cells.shape[0], self.embedding_dim)).to(batch.batch_cell_feats.device)
         augmented_hyperedge_embeddings = torch.zeros((self.num_views, batch.batch_subgraph_hyperedges.shape[0], self.embedding_dim)).to(batch.batch_cell_feats.device)
         # forward on data with noise
-        orig_node_feats = batch.batch_cell_feats
         for i in range(self.num_views):
-            perturbed_cell_feats = self.__add_gaussian_noise(orig_node_feats)
-            
+            perturbed_cell_feats = self.__add_gaussian_noise(batch.batch_cell_feats)
             # augmented_node_embeddings[i], augmented_hyperedge_embeddings[i] = self.encoder(perturbed_node_feats,
             #                                                                                hyperedge_ids,
             #                                                                                incidence_matrix)
-            augmented_node_embeddings[i], augmented_hyperedge_embeddings[i] = self.encoder(namedtuple("Batch", 
-                                                                                                      ["batch_cell_feats", 
-                                                                                                        "batch_incidence_matrix"])(perturbed_cell_feats,
-                                                                                                                                   batch.batch_incidence_matrix))
+            augmented_node_embeddings[i], augmented_hyperedge_embeddings[i] = self.encoder(batch._replace(batch_cell_feats=perturbed_cell_feats))
 
 
         

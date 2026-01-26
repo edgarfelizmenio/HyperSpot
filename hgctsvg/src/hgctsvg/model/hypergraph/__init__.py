@@ -16,9 +16,12 @@ class HypergraphEmbedderArgs:
     input_dim: int
     embedding_dim: int
     dropout: float = 0.2
+    latent_dim: Optional[int] = None
     num_heads: Optional[int] = None
     num_blocks: Optional[int] = None
-    output_dim: Optional[int] = None
+    num_hyperedges: Optional[int] = None
+    hyperedge_feats: Optional[str] = None
+
     
 class HypergraphEmbedder(nn.Module, ABC):
     _registry: Dict[str, HypergraphEmbedder] = {}

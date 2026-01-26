@@ -5,8 +5,8 @@ import scanpy as sc
 import torch
 
 from cyclopts import App, Parameter
-from dataclasses import dataclass, field
-from typing import Optional, Annotated
+from dataclasses import dataclass, astuple
+from typing import Optional, Annotated, List
 
 from pathlib import Path
 from tqdm.auto import tqdm
@@ -16,7 +16,7 @@ from . import config
 from .data import STHypergraphData
 from .dataset.hypergraph import STHypergraphListDataset
 
-from .pipeline import HypergraphEmbedderDriver, HypergraphEmbedderArgs, HGCTSVGClustering, load_sc_classifier_inputs, load_sc_classifier_input, train_sc_embedding_classifiers, Explainer
+from .pipeline import HypergraphEmbedderDriver, HypergraphEmbedderArgs, HGCTSVGClustering, SCEmbeddingSpatialClassifierDriver, Explainer, ExplainerArgs
 
 app = App(name="hgctsvg")
 
@@ -30,14 +30,21 @@ class ProjectArgs:
         return config.project_files_dir / self.name
 
 @dataclass
-class EmbedderArgs:
+class EmbedderCLIArgs:
     model_name: Annotated[str, Parameter(help=f"Name of hypergraph embedder to use. Possible values: {HypergraphEmbedderDriver.get_available_embedders()}")]
     input_dim: Annotated[int, Parameter(help="Number of input features.")]
     embedding_dim: Annotated[int, Parameter(help="Size of embedding.")]
     dropout: Annotated[Optional[float], Parameter(help="Dropout parameter.")] = 0.1
+    latent_dim: Annotated[Optional[int], Parameter(help="Size of hidden embedding (for transformer and fusion embedders only).")] = None
     num_heads: Annotated[Optional[int], Parameter(help="Number of attention heads (for transformers only).")] = None
     num_blocks: Annotated[Optional[int], Parameter(help="Number of transformer blocks (for transformers only).")] = None
-    output_dim: Annotated[Optional[int], Parameter(help="Size of fused embedding (for fusion embedders only).")] = None
+    num_hyperedges: Annotated[Optional[int], Parameter(help="Number of hyperedges (for transformers only).")] = None
+    hyperedge_feats: Annotated[Optional[str], Parameter(help="Initial value of hyperedge features (for transformers only).")] = None
+
+@dataclass
+class ClassifierCLIArgs:
+    embedding_dim: Annotated[int, Parameter(help="The size of the embedding.")]
+    num_layers: Annotated[int, Parameter(help="The number of layers of the classifier")] = 3
     
 @dataclass
 class TrainerArgs:
@@ -56,13 +63,9 @@ class ClusterArgs:
     # TODO: include leiden clustering options
 
 @dataclass
-class ClassifierArgs:
-    embedding_dim: int
-    num_layers: int = 3
-
-@dataclass
-class AttributionArgs:
-    n_steps: int = 1000
+class ExplainerCLIArgs:
+    n_steps: Annotated[int, Parameter(help="Number of steps performed by Integrated Gradients")] = 1000
+    batch_size: Annotated[int, Parameter(help="Number of input samples for each batch of Integrated Gradients.")] = None
     accelerator: config.AcceleratorOptions = config.AcceleratorOptions.CUDA
 
 @app.command(help="Create a project files directory.",
@@ -74,7 +77,7 @@ def init_project_files_dir():
 @app.command(help="Fit a hypergraph model for making embeddings.",
              sort_key=2)
 def train_embedder(project: ProjectArgs,
-         model: EmbedderArgs,
+         model: EmbedderCLIArgs,
          trainer: TrainerArgs):
 
     hypergraph = STHypergraphData.load(project.project_dir)
@@ -94,7 +97,7 @@ def train_embedder(project: ProjectArgs,
 @app.command(help="Use the trained hypergraph model to generate the embeddings.",
              sort_key=3)
 def make_embedding(project: ProjectArgs,
-                   model: EmbedderArgs,
+                   model: EmbedderCLIArgs,
                    trainer: TrainerArgs):
 
     hypergraph = STHypergraphData.load(project.project_dir)
@@ -141,41 +144,30 @@ def compute_celltype_spatial_domains(project: ProjectArgs,
 
 @app.command(help="Fit a classifier that maps embedding features into cell type-specific spatial domains", 
              sort_key=6)
-def train_celltype_domain_classifier(project: ProjectArgs,
-                     classifier: ClassifierArgs,
+def train_celltype_domain_classifiers(project: ProjectArgs,
+                     classifier: ClassifierCLIArgs,
                      trainer: TrainerArgs):
-    
-    cell_types, cell_type_embeddings, cell_type_classes, cell_type_num_classes = load_sc_classifier_inputs(project.project_dir)
 
-    train_sc_embedding_classifiers(project.project_dir, 
-                                   classifier.embedding_dim,
-                                   cell_types,
-                                   cell_type_num_classes,
-                                   classifier.num_layers,
-                                   cell_type_embeddings,
-                                   cell_type_classes,
-                                   trainer.num_epochs,
-                                   trainer.batch_size,
-                                   trainer.accelerator)
+    driver = SCEmbeddingSpatialClassifierDriver(project.project_dir)
+    driver.train_sc_embedding_classifiers(classifier.embedding_dim,
+                                          classifier.num_layers,
+                                          trainer.num_epochs,
+                                          trainer.batch_size,
+                                          trainer.accelerator)
 
 @app.command(help="Given the trained classifier trained on embeddings, identify embedding dimensions that are highly attributed into each celltype-specific spatial domains.",
              sort_key=7)
 def compute_cell_embedding_attributions(project: ProjectArgs,
-                                        cell_type: str,
-                                        classifier: ClassifierArgs,
-                                        attribution: AttributionArgs):
-
-    embeddings, classes, num_classes = load_sc_classifier_input(project.project_dir, cell_type)
+                                        classifier: ClassifierCLIArgs,
+                                        explainer: ExplainerCLIArgs,
+                                        cell_types: Optional[List[str]] = None):
     
-    explainer = Explainer(project.project_dir)
-    explainer.compute_cell_type_spatial_embedding_attribution(cell_type,
-                                                              classifier.embedding_dim,
-                                                              classifier.num_layers,
-                                                              num_classes,
-                                                              embeddings,
-                                                              classes,
-                                                              attribution.n_steps,
-                                                              attribution.accelerator)
+    driver = Explainer(project.project_dir)
+    driver.compute_cell_type_spatial_embedding_attribution(cell_types,
+                                                           *astuple(classifier),
+                                                           ExplainerArgs(**vars(explainer)))
+
+
 
 @app.command(help="Check if project folder exists.",
              sort_key=8)
