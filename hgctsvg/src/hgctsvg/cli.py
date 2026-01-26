@@ -167,10 +167,21 @@ def compute_cell_embedding_attributions(project: ProjectArgs,
                                                            *astuple(classifier),
                                                            ExplainerArgs(**vars(explainer)))
 
+@app.command(help="Computes the attributions of all metagenes to a certain region of a cell type.", sort_key=8)
+def compute_metagene_to_region_attribution(project: ProjectArgs,
+                                           cell_type: str,
+                                           region: int,
+                                           classifier: ClassifierCLIArgs,
+                                           explainer: ExplainerCLIArgs):
 
+    driver = Explainer(project.project_dir)
+    driver.compute_metagene_to_region_attribution(cell_type,
+                                                 region,
+                                                 *astuple(classifier),
+                                                 ExplainerArgs(**vars(explainer)))
 
 @app.command(help="Check if project folder exists.",
-             sort_key=8)
+             sort_key=9)
 def folder_test(project: ProjectArgs):
     if project.project_dir.exists():
         print(f"Folder {project.project_dir} exists!")

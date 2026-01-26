@@ -268,13 +268,15 @@ class IntraClassContrastiveLoss(nn.Module):
         positive_pair_loss = (cross_view_similarity / temp).exp().sum(dim=0)  # (N,)
 
         if same_class_mask is not None:
-            # no_common = (commonality_matrix == 0) * same_class_mask
+            no_common = (commonality_matrix == 0) * same_class_mask
             commonality_matrix *= same_class_mask
-
+        else:
+            no_common = (commonality_matrix == 0)
+            
         diag = commonality_matrix.diag().unsqueeze(1)
         pos_pair_prob = commonality_matrix/diag
         weak_positive_weight = commonality_matrix * pos_pair_prob
-        no_common = (commonality_matrix == 0)
+        # no_common = (commonality_matrix == 0)
         
         # similarity is the pair-wise similarity between projections of the original view.
         # Dimension: NxN

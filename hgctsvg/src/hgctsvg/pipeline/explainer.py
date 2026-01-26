@@ -1,6 +1,7 @@
 import numpy as np
 
-import  torch
+import torch
+import torch.nn.functional as F
 
 from dataclasses import dataclass
 
@@ -37,10 +38,8 @@ class Explainer(object):
     def __init__(self, project):
         self.project = project
         self.output_dir = self.project / "attribution"
-
-        if not self.output_dir.exists():
-            self.output_dir.mkdir()
-    
+        self.output_dir.mkdir(exist_ok=True)
+            
     def compute_spatial_domain_genes(self):
         pass
 
@@ -82,7 +81,9 @@ class Explainer(object):
                                             target=classes, 
                                             n_steps=args.n_steps,
                                             internal_batch_size=embeddings.shape[0])
-        
+
+                attributions = F.normalize(attributions)
+                
                 # process attributions
                 # group by label and compute mean attribution per label
                 classes = classes.view(classes.size(0), 1).expand(-1, attributions.size(1))
@@ -103,12 +104,13 @@ class Explainer(object):
                 attr_cell_type["attributions"] = attributions
                 attr_cell_type["total_per_label"] = total_attr_per_label
                 attr_cell_type["mean_per_label"] = mean_attr_per_label
-                np.savez(self.output_dir / f"attributions_{cell_type}.npz", **attr_cell_type) 
-
+                self.save_ct_result(cell_type, attr_cell_type, "top_metagenes")
+    
     def compute_metagene_to_region_attribution(self,
                                                cell_type: str,
-                                               embedding_dim: int,
                                                region: int,
+                                               embedding_dim: int,
+                                               num_layers: int,
                                                explainer_args: ExplainerArgs):
 
         self.device = get_device(explainer_args.accelerator)
@@ -128,8 +130,11 @@ class Explainer(object):
                                    n_steps=explainer_args.n_steps,
                                    internal_batch_size=embeddings.shape[0])
 
-        np.savez()
-        pass
+        attributions = F.normalize(attributions)
+        attributions = attributions.cpu().numpy()
+
+        
+        self.save_ct_result(cell_type, attributions, f"region-{region}")
         
     def compute_cell_feature_attribution(self,
                                          hypergraph: STHypergraphData,
@@ -170,6 +175,15 @@ class Explainer(object):
                 # TODO save attribution score for embedding of each batch
             # TODO save attribution scores for each embedding
 
+    def save_ct_result(self, cell_type, result_data: np.ndarray | dict, name):
+        ct_results_dir = self.output_dir / f"cell_type_{cell_type}"
+        ct_results_dir.mkdir(exist_ok=True)
+
+        if isinstance(result_data, np.ndarray):
+            np.save(ct_results_dir / f"{name}.npy", result_data)
+        elif isinstance(result_data, dict):
+            np.savez(ct_results_dir / f"{name}.npz", **result_data)
+        
     def load_embedding_index_list(self, cell_types=List[str]):
         attributions = {
         }
@@ -192,5 +206,3 @@ def find_representative_embeddings(embeddings):
     representative_embedding = embeddings[most_similar_index]
     
     return representative_embedding
-
-
