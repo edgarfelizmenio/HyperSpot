@@ -39,19 +39,6 @@ class HypergraphEmbedderDriver(object):
         self.project = project
       
         logger.info("Initializing model...")
-        # self.model = STHypergraphTransformer(
-        #     input_dim, 
-        #     embedding_dim, 
-        #     num_spots,
-        #     num_heads, 
-        #     dropout=0.1
-        # )
-        
-        # self.model = HyFiHGNN(
-        #     input_dim,
-        #     embedding_dim,
-        #     dropout=0.1
-        # )
     
     def __setup_model(self, 
                       args: HypergraphEmbedderArgs, 
@@ -197,12 +184,16 @@ class HypergraphEmbedderDriver(object):
         node_id_batches = []
         hyperedge_id_batches = []
         for batch in tqdm(hgloader, leave=False, disable=True):
-            n_cells, n_hyperedges = batch.batch_incidence_matrix.shape
+            n_cells = batch.sample_n_cells
+            n_hyperedges = batch.sample_n_hyperedges
+            
             node_embedding_batch, hyperedge_embedding_batch = self.__step_batch(batch)
             node_embedding_batches.append(node_embedding_batch[:n_cells].detach().cpu())
             hyperedge_embedding_batches.append(hyperedge_embedding_batch[:n_hyperedges].detach().cpu())
+            
             node_id_batches.append(batch.batch_subgraph_cells[:n_cells].detach().cpu())
             hyperedge_id_batches.append(batch.batch_subgraph_hyperedges[:n_hyperedges].detach().cpu())
+
             print(node_embedding_batch.shape, node_embedding_batch[:n_cells].shape)
             print(hyperedge_embedding_batch.shape, hyperedge_embedding_batch[:n_hyperedges].shape)
 
@@ -213,18 +204,35 @@ class HypergraphEmbedderDriver(object):
         print(node_embeddings.shape)
         
         node_ids = torch.cat(node_id_batches, dim=0)
-        hyperedge_ids = torch.cat(hyperedge_id_batches, dim=0)
-        
         node_order = torch.argsort(node_ids)
-        hyperedge_order = torch.argsort(hyperedge_ids)
-
         node_embeddings = node_embeddings[node_order]
+        
+        hyperedge_ids = torch.cat(hyperedge_id_batches, dim=0)
+        hyperedge_ids, hyperedge_embeddings = self.__reduce_hyperedge_embeddings(hyperedge_embeddings,
+                                                                                 hyperedge_ids)
+        
+        hyperedge_order = torch.argsort(hyperedge_ids)
         hyperedge_embeddings = hyperedge_embeddings[hyperedge_order]
 
         print(node_embeddings.shape, hyperedge_embeddings.shape)
         torch.save(node_embeddings, self.project / "node_embeddings.pth")
         torch.save(hyperedge_embeddings, self.project / "hyperedge_embeddings.pth")
 
+    def __reduce_hyperedge_embeddings(self, hyperedge_embeddings, hyperedge_ids):
+        hyperedge_ids = hyperedge_ids.squeeze().long()
+        unique_ids, emb_to_id = torch.unique(hyperedge_ids, sorted=True, return_inverse=True)
+        out = torch.zeros(unique_ids.numel(), hyperedge_embeddings.size(1), device=hyperedge_embeddings.device)
+        count = torch.zeros(unique_ids.numel(), device=hyperedge_embeddings.device)
+    
+        out.scatter_reduce_(0, 
+                            emb_to_id[:, None].expand_as(hyperedge_embeddings), 
+                            hyperedge_embeddings, "sum", include_self=False)
+        count.scatter_reduce_(0, 
+                              emb_to_id, torch.ones_like(emb_to_id, dtype=count.dtype), 
+                              "sum", include_self=False)
+    
+        return unique_ids, out / count[:, None]        
+    
     @classmethod
     def get_available_embedders(cls):
         return HypergraphEmbedder.get_available_embedders()
