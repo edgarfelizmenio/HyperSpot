@@ -21,12 +21,10 @@ from ..dataset.hypergraph import STHypergraphMatrixDataset, STHypergraphBatchMat
 
 from ..utils import build_incidence_matrix
 
-# from ..model.hypergraph.transformer import STHypergraphTransformer
-# from ..model.hypergraph.hgnn import HyFiHGNN
 from ..model.hypergraph import HypergraphEmbedder, HypergraphEmbedderArgs
-from ..model.cl.hyfi import HyFi, HyFiLoss, IntraClassContrastiveLoss
+from ..model.cl.hyfi import HyFi, HyFiLoss 
+from ..model.cl.hgctsvgloss import IntraClassContrastiveLoss, HGCTSVGLoss
 # from ..model.cl.tricl import TriCL, TriCLLoss
-# from ..model.classifier import Classifier
 
 from ..config import AcceleratorOptions
 
@@ -74,7 +72,7 @@ class HypergraphEmbedderDriver(object):
 
         self.__setup_model(embedder_args,
                            accelerator)
-        self.criterion = IntraClassContrastiveLoss(embedder_args.embedding_dim)
+        self.criterion = HGCTSVGLoss(embedder_args.embedding_dim)
         self.__configure_optimizer()
         self.criterion.to(self.device)
         
