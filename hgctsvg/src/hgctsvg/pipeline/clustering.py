@@ -43,7 +43,7 @@ class HGCTSVGClustering(object):
                             embedding_key="embedding",
                             resolution=1):
         
-        sc.pp.neighbors(adata_st, use_rep='embedding', metric='euclidean', knn=False, method='gauss')
+        sc.pp.neighbors(adata_st, use_rep='embedding', metric='euclidean', knn=True, method='umap')
         sc.tl.leiden(adata_st, flavor="igraph", n_iterations=-1, resolution=resolution)
 
         cluster_results = adata_st.obs['leiden'].to_numpy(dtype=str)
@@ -66,7 +66,7 @@ class HGCTSVGClustering(object):
         cluster_results = {}
         for i, cell_type in enumerate(type_list):
             adata_celltype = adata_decomp[adata_decomp.obs[cell_type_key] == cell_type].copy()
-            sc.pp.neighbors(adata_celltype, use_rep=embedding_key, metric='euclidean', knn=False, method='gauss')
+            sc.pp.neighbors(adata_celltype, use_rep=embedding_key, metric='euclidean', knn=True, method='umap')
             sc.tl.leiden(adata_celltype, flavor="igraph", n_iterations=-1, resolution=resolution)
             
             adata_celltype.write_h5ad(self.output_dir / f"ST_cell_{cell_type}.h5ad")
