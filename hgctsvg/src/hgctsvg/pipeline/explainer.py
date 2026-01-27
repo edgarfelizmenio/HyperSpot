@@ -82,7 +82,7 @@ class Explainer(object):
                                             n_steps=args.n_steps,
                                             internal_batch_size=embeddings.shape[0])
 
-                attributions = F.normalize(attributions)
+                # attributions = F.normalize(attributions)
                 
                 # process attributions
                 # group by label and compute mean attribution per label
@@ -130,19 +130,18 @@ class Explainer(object):
                                    n_steps=explainer_args.n_steps,
                                    internal_batch_size=embeddings.shape[0])
 
-        attributions = F.normalize(attributions)
+        # attributions = F.normalize(attributions)
         attributions = attributions.cpu().numpy()
 
-        
         self.save_ct_result(cell_type, attributions, f"region-{region}")
         
-    def compute_cell_feature_attribution(self,
-                                         hypergraph: STHypergraphData,
-                                         args: HypergraphEmbedderArgs,
-                                         embedding_idx: List[int] | int,
-                                         batch_size: int,
-                                         n_steps: int,
-                                         accelerator: AcceleratorOptions):
+    def compute_feature_to_metagene_attribution(self,
+                                                hypergraph: STHypergraphData,
+                                                args: HypergraphEmbedderArgs,
+                                                embedding_idx: List[int] | int,
+                                                batch_size: int,
+                                                n_steps: int,
+                                                accelerator: AcceleratorOptions):
         
         if isinstance(embedding_idx, int):
             embedding_idx = list(embedding_idx)
