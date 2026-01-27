@@ -62,9 +62,9 @@ class HyFiEmbedder(HypergraphEmbedder):
     def checkpoint_name(cls) -> str:
         return "HyFiEmbedder"
 
-    def get_attribution_forward(self):
+    def get_attribution_forward(self, index = 0):
         def attribution_forward(self, feats, incidence_matrix):
-            return self.model(feats, incidence_matrix)[0]
+            return self.model(feats, incidence_matrix)[index]
 
     def get_attribution_inputs(self, batch):
         inputs = batch.batch_cell_feats

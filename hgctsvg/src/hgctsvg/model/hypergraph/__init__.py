@@ -68,7 +68,7 @@ class HypergraphEmbedder(nn.Module, ABC):
         pass
     
     @abstractmethod
-    def get_attribution_forward(self) -> Callable[..., torch.Tensor]:
+    def get_attribution_forward(self, index = 0) -> Callable[..., torch.Tensor]:
         raise NotImplementedError
 
     @abstractmethod
