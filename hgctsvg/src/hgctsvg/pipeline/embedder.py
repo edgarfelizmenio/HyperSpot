@@ -37,7 +37,6 @@ class HypergraphEmbedderDriver(object):
                  sigma=1):
         
         self.project = project
-      
         logger.info("Initializing model...")
     
     def __setup_model(self, 
@@ -210,9 +209,6 @@ class HypergraphEmbedderDriver(object):
         hyperedge_ids = torch.cat(hyperedge_id_batches, dim=0)
         hyperedge_ids, hyperedge_embeddings = self.__reduce_hyperedge_embeddings(hyperedge_embeddings,
                                                                                  hyperedge_ids)
-        
-        hyperedge_order = torch.argsort(hyperedge_ids)
-        hyperedge_embeddings = hyperedge_embeddings[hyperedge_order]
 
         print(node_embeddings.shape, hyperedge_embeddings.shape)
         torch.save(node_embeddings, self.project / "node_embeddings.pth")
