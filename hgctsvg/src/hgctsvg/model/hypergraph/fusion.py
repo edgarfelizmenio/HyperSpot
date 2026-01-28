@@ -53,8 +53,10 @@ class SpatialFusionNetwork(nn.Module):
         node_h = self.act(self.node_linear(node_feats))
         hyperedge_h = self.act(self.hyperedge_linear(hyperedge_feats))
 
-        fused_node_embeddings = self.act(self.node_embedding_linear(torch.cat((node_embeddings, node_h), dim = 1)))
-        fused_hyperedge_embeddings = self.act(self.hyperedge_embedding_linear(torch.cat((hyperedge_embeddings,hyperedge_h), dim = 1)))
+        fused_node_embeddings = self.act(self.node_embedding_linear(torch.cat((node_embeddings, 
+                                                                               node_h), dim = 1)))
+        fused_hyperedge_embeddings = self.act(self.hyperedge_embedding_linear(torch.cat((hyperedge_embeddings,
+                                                                                         hyperedge_h), dim = 1)))
     
         return fused_node_embeddings, fused_hyperedge_embeddings
 
