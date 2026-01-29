@@ -1,4 +1,5 @@
 import torch
+
 from pathlib import Path
 
 class STHypergraphData(object):
@@ -41,3 +42,14 @@ class STHypergraphData(object):
             data["num_cell_types"],
             data["num_spots"]
         )
+
+def get_ids_per_celltype(data: STHypergraphData):
+    per_celltype_idx = [
+        get_celltype_ids(data, ct) for ct in range(cell_types.max() + 1)
+    ]
+    
+    return per_celltype_idx
+
+def get_celltype_ids(data: STHypergraphData, ct: int):
+    cell_types = data["cell_types"]
+    return torch.where(cell_types == ct)[0]

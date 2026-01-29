@@ -1,6 +1,8 @@
 import gzip
 import numpy as np
 
+import scanpy as sc
+
 import torch
 import torch.nn.functional as F
 
@@ -12,10 +14,10 @@ from typing import List
 
 from captum.attr import IntegratedGradients
 
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, TensorDataset
 from torch.utils.data.sampler import BatchSampler, SequentialSampler
 
-from ..data import STHypergraphData
+from ..data import STHypergraphData, get_ids_per_celltype, get_celltype_ids
 from ..dataset.hypergraph import STHypergraphMatrixDataset, STHypergraphBatchMatrixData
 
 from ..model.classifier import EmbeddingClassifier, EmbeddingClassifierArgs
@@ -111,7 +113,7 @@ class Explainer(object):
                 attr_cell_type["total_per_label"] = total_attr_per_label
                 attr_cell_type["mean_per_label"] = mean_attr_per_label
                 self.save_ct_result(cell_type, attr_cell_type, "top_metagenes")
-        
+    
     def compute_metagene_to_region_attribution(self,
                                                cell_type: str,
                                                region: int,
@@ -130,7 +132,7 @@ class Explainer(object):
         classifier_model.to(self.device)
         embeddings = embeddings.to(self.device)
         
-        ig = IntegratedGradients(classifier_model)
+        ig = IntegratedGradients(classifier_model, multiply_by_inputs=True)
         attributions = ig.attribute(embeddings, 
                                    target=region, 
                                    n_steps=explainer_args.n_steps,
@@ -157,41 +159,190 @@ class Explainer(object):
             embedding_idx = list(range(embedder_args.embedding_dim))
         elif isinstance(embedding_idx, int):
             embedding_idx = list(embedding_idx)
-        
-        hgdataset = STHypergraphMatrixDataset(hypergraph)
-        hgexpsampler = BatchSampler(
-            SequentialSampler(hgdataset),
-            batch_size=explainer_args.batch_size,
-            drop_last=False
-        )
 
-        hgloader = DataLoader(hgdataset, sampler=hgexpsampler, batch_size=None)
-        
+        hgdataset = STHypergraphMatrixDataset(hypergraph)
+
         forward_fn = self.embedder.get_attribution_forward()
         ig = IntegratedGradients(forward_fn)
 
-        with tqdm(embedding_idx) as embedding_pbar:
-            for idx in embedding_pbar:
-                idx_attribution_batches = []
+        # loop structure:
+        # embedding index -> celltype -> mini batch 
+        with tqdm(embedding_idx, position=0) as embedding_pbar:
+            for idx in embedding_pbar:        
+                # compute attributions per celltype.
+                # order processing based on increasing batch size given a celltype
+                idx_attribution_ct_batches = []
+                idx_attribution_ct_ids = []
                 
-                with tqdm(hgloader, leave=False, position=1) as batch_pbar:
-                    for batch in batch_pbar:
-                        batch = batch.to_device(self.device)
-                        inputs, additional_forward_args = self.embedder.get_attribution_inputs(batch)
-                        idx_attribution_batch = ig.attribute(inputs,
-                                                       target=idx,
-                                                       n_steps=explainer_args.n_steps,
-                                                       internal_batch_size=inputs.shape[0],
-                                                       additional_forward_args = additional_forward_args)
+                processed_cells = torch.zeros(len(hgdataset), dtype=torch.bool).to(self.device)
+                # print(processed_cells.shape)
+                per_celltype_idx = get_ids_per_celltype(hypergraph)
+                total_processed = 0
+                i = 0
+                processed_pbar = tqdm(total = len(hgdataset), leave=False, position=1)
+                while not processed_cells.all():
+                    # pick celltype with smallest batch
+                    i = min((j for j in range(len(per_celltype_idx)) if per_celltype_idx[j].numel() > 0), 
+                            key=lambda j: hgdataset[per_celltype_idx[j].tolist()].batch_subgraph_cells.shape[0])
+            
+                    # get ids of cells of the sample and the neighbors
+                    ct_batch_sample = per_celltype_idx[i]
+                    ct_batch_ids = hgdataset[ct_batch_sample.tolist()].batch_subgraph_cells.to(self.device)
+                    
+                    # perform attribution computation
+                    hgexpsampler = BatchSampler(
+                        sampler = ct_batch_sample.tolist(),
+                        batch_size = explainer_args.batch_size,
+                        drop_last=False
+                    )
+            
+                    hgloader = DataLoader(hgdataset, sampler=hgexpsampler, batch_size=None)
+                    
+                    idx_attribution_batches = []   
+                    total_processed = 0
+                    with tqdm(hgloader, leave=False, position=2) as batch_pbar:
+                        for batch in batch_pbar:
+                            batch = batch.to_device(self.device)
 
-                        # limit to batch size
-                        idx_attribution_batch = idx_attribution_batch[:batch.sample_n_cells]
-                        idx_attribution_batches.append(idx_attribution_batch)
-
-                idx_attribution = torch.cat(idx_attribution_batches, dim=0)
-                idx_attribution = idx_attribution.cpu().numpy()
-                self.save_node_embedding_attr_result(idx_attribution, idx)
+                            # find the unprocessed cells
+                            is_batch_cell_unprocessed = ~processed_cells[batch.batch_subgraph_cells]
+                            unprocessed_batch_cells = batch.batch_subgraph_cells[is_batch_cell_unprocessed]
                             
+                            inputs, additional_forward_args = self.embedder.get_attribution_inputs(batch)
+                            
+                            idx_attribution_batch = ig.attribute(inputs,
+                                                           target=idx,
+                                                           n_steps=explainer_args.n_steps,
+                                                           internal_batch_size=inputs.shape[0],
+                                                           additional_forward_args = additional_forward_args)
+
+                            # dont store the cells that are already processed on previous iterations to prevent duplicates 
+                            idx_attribution_batch = idx_attribution_batch[is_batch_cell_unprocessed]
+                            idx_attribution_batches.append(idx_attribution_batch)
+
+                            # mark unprocessed batch cells as processed
+                            idx_attribution_ct_ids.append(unprocessed_batch_cells)
+                            processed_cells[unprocessed_batch_cells] = True
+                            total_processed += unprocessed_batch_cells.numel()
+                    
+                    idx_attribution_ct_batch = torch.cat(idx_attribution_batches, dim=0)
+
+                    # print(idx_attribution_ct_batch.shape[0], total_processed, per_celltype_idx[i].numel())
+                    # print()
+                    # assert idx_attribution_ct_batch.shape[0] == per_celltype_idx[i].numel()
+                    assert idx_attribution_ct_batch.shape[0] == total_processed
+                    
+                    idx_attribution_ct_batches.append(idx_attribution_ct_batch)
+
+                    mask = ~processed_cells.cpu()
+                    for j in range(len(per_celltype_idx)):
+                        ids = per_celltype_idx[j]
+                        per_celltype_idx[j] = ids[mask[ids]]
+            
+                    # print(i, batch_sample.numel(), batch_ids.numel(), unprocessed.numel(), total)
+                    processed_pbar.update(total_processed)
+                    processed_pbar.set_postfix({"cell type": i, "processed samples": total_processed})
+                
+                processed_pbar.close()
+
+                idx_attribution = torch.cat(idx_attribution_ct_batches, dim=0)
+
+                # sort result in increasing node id
+                idx_attribution_ids = torch.cat(idx_attribution_ct_ids, dim=0)
+                idx_attribution_ids = torch.argsort(idx_attribution_ids)
+                idx_attribution = idx_attribution[idx_attribution_ids]
+                idx_attribution = F.normalize(idx_attribution)
+                idx_attribution = idx_attribution.cpu().numpy()
+                self.save_node_embedding_attr_result(idx_attribution, idx)        
+
+    def compute_g2ctd_attribution(self, 
+                          cell_type,
+                          hypergraph: STHypergraphData,
+                          embedder_args: HypergraphEmbedderArgs,
+                          num_layers,
+                          explainer_args: ExplainerArgs):
+
+        self.device = get_device(explainer_args.accelerator)
+        self.embedder = HypergraphEmbedder.build(self.project, embedder_args)
+        self.embedder.load_checkpoint(self.project)
+        self.embedder.to(self.device)
+        self.embedder.eval()
+        
+
+
+        cell_types = np.loadtxt(self.project / "cell_types.txt", dtype=str)
+        ctidx = 0
+        while cell_types[ctidx] != cell_type:
+            ctidx += 1 
+        
+
+        
+        hgdataset = STHypergraphMatrixDataset(hypergraph)
+        _, classes, num_classes = load_sc_classifier_input(self.project, cell_type)
+        ids = get_celltype_ids(hypergraph, ctidx)
+
+        classifier_args = EmbeddingClassifierArgs(cell_type, embedder_args.embedding_dim, num_classes, num_layers)
+        self.classifier = EmbeddingClassifier(classifier_args)
+        self.classifier.load_checkpoint(self.project)
+        self.classifier.to(self.device)
+        self.classifier.eval()
+
+        forward_fn = self.embedder.get_e2e_attribution_forward(self.classifier)
+        ig = IntegratedGradients(forward_fn, multiply_by_inputs=True)
+        
+        dataset = TensorDataset(ids, classes)
+        loader = DataLoader(dataset, batch_size=explainer_args.batch_size, shuffle=False, drop_last=False)
+            
+        attribution_batches = []
+        with tqdm(loader, leave=False, position=0) as batch_pbar:
+            for batch_ids, batch_classes in batch_pbar:
+                hg_batch = hgdataset[batch_ids.tolist()]
+
+                hg_batch = hg_batch.to_device(self.device)
+                inputs, additional_forward_args = self.embedder.get_e2e_attribution_inputs(hg_batch)        
+
+                # inputs = inputs.to(self.device)
+                # incidence_matrix = additional_forward_args[0].to(self.device)
+                # batch_size = additional_forward_args[1]
+                batch_classes = batch_classes.to(self.device)
+                attribution_batch = ig.attribute(inputs, 
+                                            target=batch_classes, 
+                                            n_steps=explainer_args.n_steps,
+                                            internal_batch_size=inputs.shape[0],
+                                            additional_forward_args = additional_forward_args)
+                                                            
+                attribution_batch = F.normalize(attribution_batch)
+
+                attribution_batch = attribution_batch[:hg_batch.sample_n_cells]
+                attribution_batches.append(attribution_batch)
+        
+        attributions = torch.cat(attribution_batches, dim=0)
+
+        assert attributions.shape[0] == ids.shape[0]
+        assert attributions.shape[0] == classes.shape[0]
+        
+        # process attributions
+        # group by label and compute mean attribution per label
+        classes = classes.view(classes.size(0), 1).expand(-1, attributions.size(1)).to(attributions.device)
+        unique_classes, classes_count = classes.unique(dim=0, return_counts=True)
+
+        attr_cell_type = {}
+
+        total_attr_per_label = torch.zeros_like(unique_classes, 
+                                                dtype=torch.float, 
+                                                device=self.device).scatter_add(0, classes, attributions)
+        
+        mean_attr_per_label = total_attr_per_label / classes_count.float().unsqueeze(1)
+
+        attributions = attributions.cpu().numpy()
+        total_attr_per_label = total_attr_per_label.cpu().numpy() 
+        mean_attr_per_label = mean_attr_per_label.cpu().numpy()
+
+        attr_cell_type["attributions"] = attributions
+        attr_cell_type["total_per_label"] = total_attr_per_label
+        attr_cell_type["mean_per_label"] = mean_attr_per_label
+        self.save_ct_result(cell_type, attr_cell_type, "top_genes")
+        
     def save_ct_result(self, cell_type, result_data: np.ndarray | dict, name):
         ct_results_dir = self.output_dir / f"cell_type_{cell_type}"
         ct_results_dir.mkdir(exist_ok=True)
@@ -200,6 +351,10 @@ class Explainer(object):
             np.save(ct_results_dir / f"{name}.npy", result_data)
         elif isinstance(result_data, dict):
             np.savez(ct_results_dir / f"{name}.npz", **result_data)
+
+    def load_ct_results(self, cell_type, name):
+        ct_results_dir = self.output_dir / f"cell_type_{cell_type}"
+        return np.load(ct_results_dir / f"{name}.npz")
 
     def save_node_embedding_attr_result(self, result, idx):
         results_dir = self.output_dir / f"node_embedding"
@@ -221,21 +376,61 @@ class Explainer(object):
         }
         for cell_type in cell_types:
             pass
-            # attributions[]   
+            # attributions[]
 
-def find_domain_metagene_idx(attributions, num_regions, alpha=1.5):
-    """
-    Select spatial domain SVGs (spatially variable genes)
-    """
-    attr_abs = [np.abs(attributions[i]) for i in range(num_regions)]
-    attr_mean = [np.mean(attr_abs[i]) for i in range(num_regions)]
-    attr_std = [np.std(attr_abs[i]) for i in range(num_regions)]
-    attr_high = [attr_abs[i] > attr_mean[i] + alpha*attr_std[i] for i in range(num_regions)]
-    metagene_idx = [attr_high[i].nonzero()[0] for i in range(num_regions)]
-    metagene_idx_order = [np.argsort(-np.abs(attributions[i][metagene_idx[i]])) for i in range(num_regions)]
-    metagene_idx = [metagene_idx[i][metagene_idx_order[i]] for i in range(num_regions)]
+    def find_domain_metagene_idx(self, cell_type, alpha=1.5):
+        attributions_dict = self.load_ct_results(cell_type, "top_metagenes")
+        attributions_mean = attributions_dict["mean_per_label"]
+        
+        adata_celltype = sc.read_h5ad(self.project / "clustering" / f"ST_cell_{cell_type}.h5ad")
+        num_regions = adata_celltype.obs['leiden'].nunique()
+        
+        return find_relevant_features(attributions_mean, num_regions, alpha)
+
+    def find_domain_gene_idx(self, cell_type, alpha=1.5):
+        attributions_dict = self.load_ct_results(cell_type, "top_genes")
+        attributions_mean = attributions_dict["mean_per_label"]
+        
+        adata_celltype = sc.read_h5ad(self.project / "clustering" / f"ST_cell_{cell_type}.h5ad")
+        num_regions = adata_celltype.obs['leiden'].nunique()
+        
+        return find_relevant_features(attributions_mean, num_regions, alpha)
     
-    return metagene_idx
+    def find_ctsvgs(self, cell_type, alpha=1.5):
+        for i in range(num_vars):
+            # get feature i as fi 
+            pass
+            for j in range(embedding_dim):
+                # get metagene j as gj
+                # get attr of fi on gj as afi (attribution / node_embedding / idx_j.npy.gz
+                # get attr of gj on prediction as agj
+                # compute afgij = afi * agj
+            # compute ah    
+                pass            
+                # load attributions for embedding_dim
+                for k in range(num_regions):
+                    # load attributions for celltype
+                    pass
+
+
+def find_relevant_features(attributions, num_indexes, alpha=1.5):
+    """
+    Find metagenes associated with cell spatial domains.
+    """
+    attr_abs = [np.abs(attributions[i]) for i in range(num_indexes)]
+    attr_mean = [np.mean(attr_abs[i]) for i in range(num_indexes)]
+    attr_std = [np.std(attr_abs[i]) for i in range(num_indexes)]
+
+    # find features with attribution higher than mean + alpha*std
+    attr_high = [attr_abs[i] > attr_mean[i] + (alpha * attr_std[i]) for i in range(num_indexes)]
+    feature_idx = [attr_high[i].nonzero()[0] for i in range(num_indexes)]
+
+    # order by decreasing absolute value of attribution
+    feature_idx_order = [np.argsort(-attr_abs[i][feature_idx[i]]) for i in range(num_indexes)]
+    feature_idx = [feature_idx[i][feature_idx_order[i]] for i in range(num_indexes)]
+    
+    return feature_idx
+
 
 
 def find_representative_embeddings(embeddings):

@@ -71,3 +71,18 @@ class HyFiEmbedder(HypergraphEmbedder):
         inputs = batch.batch_cell_feats
         additional_forward_args = (batch.batch_incidence_matrix,)
         return inputs, additional_forward_args
+
+    def get_e2e_attribution_forward(self, classifier, index = 0):
+        def attribution_forward(feats, incidence_matrix, batch_size):
+            embedding = self.model(feats, incidence_matrix)[index]
+            embedding = embedding[:batch_size]
+            return classifier(embedding)
+        return attribution_forward
+
+    def get_e2e_attribution_inputs(self, batch):
+        inputs, additional_forward_args = self.get_attribution_inputs(batch)
+        incidence_matrix = additional_forward_args[0]
+        batch_size = batch.sample_n_cells
+        additional_forward_args = (incidence_matrix, batch_size)
+        return inputs, additional_forward_args
+        

@@ -1,5 +1,7 @@
 import torch
 
+from typing import List
+
 from . import STHypergraphDataset, STHypergraphBatchMatrixData
 
 from ...data import STHypergraphData
@@ -17,7 +19,7 @@ class STHypergraphMatrixDataset(STHypergraphDataset):
     def __len__(self):
         return self.cell_feats.shape[0]
         
-    def __getitem__(self, idx) -> STHypergraphBatchMatrixData:
+    def __getitem__(self, idx: List[int]) -> STHypergraphBatchMatrixData:
         '''
         Get sub-hypergraph induced by cells indicated by idx
             Params: idx - index of the cells

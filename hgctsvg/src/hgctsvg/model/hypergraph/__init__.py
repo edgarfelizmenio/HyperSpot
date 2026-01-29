@@ -75,6 +75,14 @@ class HypergraphEmbedder(nn.Module, ABC):
     def get_attribution_inputs(self, batch) -> Tuple[torch.Tensor, tuple]:
         raise NotImplementedError
 
+    @abstractmethod
+    def get_e2e_attribution_forward(self, classifier, index = 0):
+        raise NotImplementedError
+    
+    @abstractmethod
+    def get_e2e_attribution_inputs(self, batch):
+        raise NotImplementedError
+
 from .fusion import SpatialFusionEmbedder
 from .hgnn import HyFiEmbedder
 from .transformer import HGTransformerEmbedder

@@ -193,8 +193,26 @@ def compute_gene_to_cell_metagene_attribution(project: ProjectArgs,
                                                              ExplainerArgs(**vars(explainer)),
                                                              idx)
 
+@app.command(help="Computes the attributions of genes to a celltype spatial domain.", sort_key=10)
+def compute_gene_to_celltype_domain_attribution(project: ProjectArgs,
+                                              cell_type: str,
+                                              model: EmbedderCLIArgs,
+                                              classifier: ClassifierCLIArgs,
+                                              explainer: ExplainerCLIArgs):
+    
+    hypergraph = STHypergraphData.load(project.project_dir)
+
+    assert model.embedding_dim == classifier.embedding_dim
+    
+    driver = Explainer(project.project_dir)
+    driver.compute_g2ctd_attribution(cell_type,
+                                     hypergraph,
+                                     HypergraphEmbedderArgs(**vars(model)),
+                                     classifier.num_layers,
+                                     ExplainerArgs(**vars(explainer)))
+
 @app.command(help="Check if project folder exists.",
-             sort_key=10)
+             sort_key=11)
 def folder_test(project: ProjectArgs):
     if project.project_dir.exists():
         print(f"Folder {project.project_dir} exists!")
