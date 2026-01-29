@@ -83,8 +83,9 @@ class SpatialFusionEmbedder(HypergraphEmbedder):
         return self.model(feats, incidence_matrix)
 
     def get_attribution_forward(self, index = 0):
-        def attribution_forward(self, feats, incidence_matrix):
+        def attribution_forward(feats, incidence_matrix):
             return self.model(feats, incidence_matrix)[index]
+        return attribution_forward
 
     def get_attribution_inputs(self, batch):
         inputs = batch.batch_cell_feats

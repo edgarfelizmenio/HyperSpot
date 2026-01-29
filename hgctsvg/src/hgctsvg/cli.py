@@ -180,8 +180,21 @@ def compute_metagene_to_region_attribution(project: ProjectArgs,
                                                  *astuple(classifier),
                                                  ExplainerArgs(**vars(explainer)))
 
+@app.command(help="Computes the attributions of genes to a cell metagene.", sort_key=9)
+def compute_gene_to_cell_metagene_attribution(project: ProjectArgs,
+                                         model: EmbedderCLIArgs,
+                                         explainer: ExplainerCLIArgs,
+                                         idx: Annotated[Optional[List[str]], Parameter(help="Indexes of metagenes where attributions have to be computed. If nothing is provided, computes the attributions of all features to all metagenes.")] = None):
+    
+    hypergraph = STHypergraphData.load(project.project_dir)
+    driver = Explainer(project.project_dir)
+    driver.compute_cell_feature_to_cell_metagene_attribution(hypergraph,
+                                                             HypergraphEmbedderArgs(**vars(model)),
+                                                             ExplainerArgs(**vars(explainer)),
+                                                             idx)
+
 @app.command(help="Check if project folder exists.",
-             sort_key=9)
+             sort_key=10)
 def folder_test(project: ProjectArgs):
     if project.project_dir.exists():
         print(f"Folder {project.project_dir} exists!")
