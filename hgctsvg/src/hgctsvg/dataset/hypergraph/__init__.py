@@ -17,7 +17,7 @@ class STHypergraphBatchMatrixData(NamedTuple):
     batch_subgraph_hyperedges: torch.Tensor
     batch_cell_feats: torch.Tensor
     batch_hyperedge_feats: torch.Tensor
-    batch_neighborhood_cell_types: torch.Tensor
+    batch_cell_types: torch.Tensor
     batch_incidence_matrix: torch.Tensor
     neighborhood_incidence_matrix: torch.Tensor
     
@@ -31,7 +31,7 @@ class STHypergraphBatchMatrixData(NamedTuple):
             batch_subgraph_hyperedges = self.batch_subgraph_hyperedges.to(device),
             batch_cell_feats = self.batch_cell_feats.to(device),
             batch_hyperedge_feats = self.batch_hyperedge_feats.to(device),
-            batch_neighborhood_cell_types = self.batch_neighborhood_cell_types.to(device),
+            batch_cell_types = self.batch_cell_types.to(device),
             batch_incidence_matrix = self.batch_incidence_matrix.to(device),
             neighborhood_incidence_matrix = self.neighborhood_incidence_matrix.to(device),
         )

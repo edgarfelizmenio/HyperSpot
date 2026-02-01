@@ -104,7 +104,7 @@ class STHypergraphMatrixDataset(STHypergraphDataset):
         
         batch_cell_feats = self.cell_feats[batch_subgraph_cells]
         batch_hyperedge_feats = self.hyperedge_feats[batch_subgraph_hyperedges]
-        neighborhood_cell_types = self.cell_types[batch_subgraph_cells[:neighborhood_n_cells]]
+        batch_cell_types = self.cell_types[batch_subgraph_cells]
         
         batch_incidence_matrix = self.incidence_matrix[batch_subgraph_cells][:, batch_subgraph_hyperedges].to(torch.float)
         neighborhood_incidence_matrix = self.incidence_matrix[batch_subgraph_cells[:neighborhood_n_cells]][:, batch_subgraph_hyperedges[:neighborhood_n_hyperedges]].to(torch.float)
@@ -125,6 +125,6 @@ class STHypergraphMatrixDataset(STHypergraphDataset):
                                      batch_subgraph_hyperedges, 
                                      batch_cell_feats, 
                                      batch_hyperedge_feats, 
-                                     neighborhood_cell_types, 
+                                     batch_cell_types, 
                                      batch_incidence_matrix,
                                      neighborhood_incidence_matrix)

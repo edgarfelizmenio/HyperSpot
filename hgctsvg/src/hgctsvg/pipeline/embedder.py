@@ -148,7 +148,7 @@ class HypergraphEmbedderDriver(object):
                                               augmented_node_embeddings[:,:batch.neighborhood_n_cells],
                                               augmented_hyperedge_embeddings[:,:batch.neighborhood_n_hyperedges], 
                                               batch.neighborhood_incidence_matrix,
-                                              batch.batch_neighborhood_cell_types,
+                                              batch.batch_cell_types[:batch.neighborhood_n_cells],
                                               batch.sample_n_cells,
                                               batch.sample_n_hyperedges)
             
