@@ -267,16 +267,12 @@ class Explainer(object):
         self.embedder.load_checkpoint(self.project)
         self.embedder.to(self.device)
         self.embedder.eval()
-        
-
 
         cell_types = np.loadtxt(self.project / "cell_types.txt", dtype=str)
         ctidx = 0
         while cell_types[ctidx] != cell_type:
             ctidx += 1 
-        
-
-        
+                
         hgdataset = STHypergraphMatrixDataset(hypergraph)
         _, classes, num_classes = load_sc_classifier_input(self.project, cell_type)
         ids = get_celltype_ids(hypergraph, ctidx)
@@ -300,7 +296,6 @@ class Explainer(object):
 
                 hg_batch = hg_batch.to_device(self.device)
                 inputs, additional_forward_args = self.embedder.get_e2e_attribution_inputs(hg_batch)        
-
                 # inputs = inputs.to(self.device)
                 # incidence_matrix = additional_forward_args[0].to(self.device)
                 # batch_size = additional_forward_args[1]
