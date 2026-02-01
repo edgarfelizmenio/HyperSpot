@@ -4,20 +4,26 @@ import torch.nn as nn
 
 from tqdm import tqdm
 
+# intraclass temp = 1.0 -> more spatial domains
+# intraclass temp = 0.1 -> less spatial domains
 class HGCTSVGLoss(nn.Module):
     def __init__(self,
                  input_dim,
                  projection_dim = 100,
-                 temp_node = 0.5,
+                 temp_interclass = 0.5,
+                 temp_intraclass = 1.0,
                  temp_hyperedge = 0.5,
                  alpha = 1.0,
-                 beta = 1.0):
+                 beta = 1.0,
+                 gamma = 1.0):
         super(HGCTSVGLoss, self).__init__()
-        
-        self.temp_node = temp_node
+
+        self.temp_interclass = temp_interclass
+        self.temp_intraclass = temp_intraclass
         self.temp_hyperedge = temp_hyperedge
         self.alpha = alpha
         self.beta = beta
+        self.gamma = gamma
 
         self.project_nodes = nn.Sequential(
             nn.Linear(input_dim, projection_dim),
@@ -44,8 +50,8 @@ class HGCTSVGLoss(nn.Module):
 
     def __compute_interclass_cl(self, similarity, same_class_mask):
         pos_pair_sim = similarity * same_class_mask
-        pos_pair_loss = (pos_pair_sim / self.temp_node).exp()
-        all_pair_loss = (similarity / self.temp_node).exp()
+        pos_pair_loss = (pos_pair_sim / self.temp_interclass).exp()
+        all_pair_loss = (similarity / self.temp_interclass).exp()
         node_pos_loss = pos_pair_loss.sum(dim=1)
         node_all_loss = all_pair_loss.sum(dim=1)
 
@@ -109,7 +115,7 @@ class HGCTSVGLoss(nn.Module):
 
         node_similarity, node_cross_view_similarity = self.__compute_similarity_matrices(node_projections, augmented_node_projections)
         node_interclass_cl = self.__compute_interclass_cl(node_similarity, same_class_mask)
-        node_intraclass_cl = self.__compute_hyfi_cl(node_similarity, node_cross_view_similarity, node_commonality, self.temp_node, same_class_mask)
+        node_intraclass_cl = self.__compute_hyfi_cl(node_similarity, node_cross_view_similarity, node_commonality, self.temp_intraclass, same_class_mask)
 
         hyperedge_similarity, hyperedge_cross_view_similarity = self.__compute_similarity_matrices(hyperedge_projections, augmented_hyperedge_projections)
         hyperedge_level_cl = self.__compute_hyfi_cl(hyperedge_similarity, hyperedge_cross_view_similarity, hyperedge_commonality, self.temp_hyperedge)
@@ -127,8 +133,8 @@ class HGCTSVGLoss(nn.Module):
         # mean_loss_per_class = total_node_loss_per_class[observed_classes] / nodes_per_class[observed_classes]
         # intraclass_node_level_cl = mean_loss_per_class.mean()
         
-        # batch_cl = intraclass_node_level_cl + self.alpha * hyperedge_level_cl.mean()
-        batch_cl = node_interclass_cl.mean() + self.alpha * node_intraclass_cl.mean() + self.beta * hyperedge_level_cl.mean()
+
+        batch_cl = self.alpha * node_intraclass_cl.mean() + self.beta * node_interclass_cl.mean() + self.gamma * hyperedge_level_cl.mean()
         
         return batch_cl
         
