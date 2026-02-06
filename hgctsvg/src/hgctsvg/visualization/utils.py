@@ -6,7 +6,7 @@ def plot_ct_decomposition(adata, ct_key='cell_type', n_cols = 4, figsize: tuple 
     cell_types = sorted(adata.obs[ct_key].unique())
     n_cell_types = adata.obs[ct_key].nunique()
 
-    n_rows = (n_cell_types // n_cols) + 1 if (n_cell_types % n_cols) > 0 else 0
+    n_rows = (n_cell_types // n_cols) + (1 if (n_cell_types % n_cols) > 0 else 0)
     
     fig, axes = plt.subplots(nrows=n_rows, ncols=n_cols, figsize=figsize)
         
