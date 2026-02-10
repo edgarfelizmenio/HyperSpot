@@ -79,4 +79,4 @@ def create_hyperedge_index(node_ids, incidence_mat):
     hyp_idx = hyperedge_indices[col_idx]
     hyperedge_index = torch.stack((cell_idx, hyp_idx))
     return hyperedge_index
-    
+

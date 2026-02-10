@@ -44,7 +44,6 @@ def create_denoiser_dataset(adata, device="cpu"):
     
     dataset = TensorDataset(data)
     return dataset
-    
 
 def get_cell_types(adata, class_name):
     cell_types = adata.obs[class_name].values.categories.to_list()
