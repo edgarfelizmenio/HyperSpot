@@ -12,7 +12,7 @@ from pathlib import Path
 from tqdm import tqdm
 from typing import List
 
-from captum.attr import IntegratedGradients
+from captum.attr import IntegratedGradients, DeepLift
 
 from torch.utils.data import DataLoader, TensorDataset
 from torch.utils.data.sampler import BatchSampler, SequentialSampler
@@ -54,95 +54,6 @@ class Explainer(object):
     def compute_spatial_domain_metagenes(self, cell_type):
         raise NotImplementedError()
 
-    def compute_cell_type_spatial_embedding_attribution(self, 
-                                                   cell_types: List[str] | str | None,
-                                                   embedding_dim,
-                                                   num_layers,
-                                                   args: ExplainerArgs):
-        
-        self.device = get_device(args.accelerator)
-
-        if cell_types is None:
-            cell_types = np.loadtxt(self.project / "cell_types.txt", dtype=str)
-        elif isinstance(cell_types, str):
-            cell_types = list[cell_types]
-        
-        with tqdm(cell_types) as ct_pbar:
-            for cell_type in ct_pbar:
-
-                ct_pbar.set_postfix({'Cell Type': cell_type})
-                # load data
-                embeddings, classes, num_classes = load_sc_classifier_input(self.project, cell_type)
-                
-                classifier_args = EmbeddingClassifierArgs(cell_type, embedding_dim, num_classes, num_layers)
-                classifier_model = EmbeddingClassifier(classifier_args)
-                classifier_model.load_checkpoint(self.project)
-
-                # TODO: perform batch training
-                
-                classifier_model.to(self.device)
-                embeddings = embeddings.to(self.device)
-                classes = classes.to(self.device)
-                
-                ig = IntegratedGradients(classifier_model, multiply_by_inputs=True)
-                attributions = ig.attribute(embeddings, 
-                                            target=classes, 
-                                            n_steps=args.n_steps,
-                                            internal_batch_size=embeddings.shape[0])
-
-                attributions = F.normalize(attributions)
-                
-                # process attributions
-                # group by label and compute mean attribution per label
-                classes = classes.view(classes.size(0), 1).expand(-1, attributions.size(1))
-                unique_classes, classes_count = classes.unique(dim=0, return_counts=True)
-
-                attr_cell_type = {}
-                
-                total_attr_per_label = torch.zeros_like(unique_classes, 
-                                                        dtype=torch.float, 
-                                                        device=self.device).scatter_add(0, classes, attributions)
-                
-                mean_attr_per_label = total_attr_per_label / classes_count.float().unsqueeze(1)
-
-                attributions = attributions.cpu().numpy()
-                total_attr_per_label = total_attr_per_label.cpu().numpy() 
-                mean_attr_per_label = mean_attr_per_label.cpu().numpy()
-
-                attr_cell_type["attributions"] = attributions
-                attr_cell_type["total_per_label"] = total_attr_per_label
-                attr_cell_type["mean_per_label"] = mean_attr_per_label
-                self.save_ct_result(cell_type, attr_cell_type, "top_metagenes")
-    
-    def compute_metagene_to_region_attribution(self,
-                                               cell_type: str,
-                                               region: int,
-                                               embedding_dim: int,
-                                               num_layers: int,
-                                               explainer_args: ExplainerArgs):
-
-        self.device = get_device(explainer_args.accelerator)
-        
-        embeddings, classes, num_classes = load_sc_classifier_input(self.project, cell_type)
-
-        classifier_args = EmbeddingClassifierArgs(cell_type, embedding_dim, num_classes, num_layers)
-        classifier_model = EmbeddingClassifier(classifier_args)
-        classifier_model.load_checkpoint(self.project)
-
-        classifier_model.to(self.device)
-        embeddings = embeddings.to(self.device)
-        
-        ig = IntegratedGradients(classifier_model, multiply_by_inputs=True)
-        attributions = ig.attribute(embeddings, 
-                                   target=region, 
-                                   n_steps=explainer_args.n_steps,
-                                   internal_batch_size=embeddings.shape[0])
-
-        attributions = F.normalize(attributions)
-        attributions = attributions.cpu().numpy()
-
-        self.save_ct_result(cell_type, attributions, f"region-{region}")
-        
     def compute_cell_feature_to_cell_metagene_attribution(self,
                                                 hypergraph: STHypergraphData,
                                                 embedder_args: HypergraphEmbedderArgs,
@@ -283,8 +194,8 @@ class Explainer(object):
         self.classifier.to(self.device)
         self.classifier.eval()
 
-        forward_fn = self.embedder.get_e2e_attribution_forward(self.classifier)
-        ig = IntegratedGradients(forward_fn, multiply_by_inputs=True)
+        forward_fn = self.embedder.get_e2e_attribution_forward(self.classifier, num_repeats=2)
+        ig = DeepLift(forward_fn, multiply_by_inputs=True)
         
         dataset = TensorDataset(ids, classes)
         loader = DataLoader(dataset, batch_size=explainer_args.batch_size, shuffle=False, drop_last=False)
@@ -292,6 +203,7 @@ class Explainer(object):
         attribution_batches = []
         with tqdm(loader, leave=False, position=0) as batch_pbar:
             for batch_ids, batch_classes in batch_pbar:
+                print(batch_classes.shape)
                 hg_batch = hgdataset[batch_ids.tolist()]
 
                 hg_batch = hg_batch.to_device(self.device)
@@ -302,11 +214,11 @@ class Explainer(object):
                 batch_classes = batch_classes.to(self.device)
                 attribution_batch = ig.attribute(inputs, 
                                             target=batch_classes, 
-                                            n_steps=explainer_args.n_steps,
-                                            internal_batch_size=inputs.shape[0],
+                                            # n_steps=explainer_args.n_steps,
+                                            # internal_batch_size=inputs.shape[0],
                                             additional_forward_args = additional_forward_args)
                                                             
-                attribution_batch = F.normalize(attribution_batch)
+                # attribution_batch = F.normalize(attribution_batch)
 
                 attribution_batch = attribution_batch[:hg_batch.sample_n_cells]
                 attribution_batches.append(attribution_batch)
@@ -329,103 +241,71 @@ class Explainer(object):
         
         mean_attr_per_label = total_attr_per_label / classes_count.float().unsqueeze(1)
 
-        attributions = attributions.cpu().numpy()
-        total_attr_per_label = total_attr_per_label.cpu().numpy() 
-        mean_attr_per_label = mean_attr_per_label.cpu().numpy()
+        attributions = attributions.detach().cpu().numpy()
 
-        attr_cell_type["attributions"] = attributions
-        attr_cell_type["total_per_label"] = total_attr_per_label
-        attr_cell_type["mean_per_label"] = mean_attr_per_label
-        self.save_ct_result(cell_type, attr_cell_type, "top_genes")
+        self.save_ct_result(cell_type, attributions)
         
-    def save_ct_result(self, cell_type, result_data: np.ndarray | dict, name):
+    def save_ct_result(self, cell_type, result_data: np.ndarray):
         ct_results_dir = self.output_dir / f"cell_type_{cell_type}"
         ct_results_dir.mkdir(exist_ok=True)
 
-        if isinstance(result_data, np.ndarray):
-            np.save(ct_results_dir / f"{name}.npy", result_data)
-        elif isinstance(result_data, dict):
-            np.savez(ct_results_dir / f"{name}.npz", **result_data)
+        np.save(ct_results_dir / f"attributions.npy", result_data)
 
-    def load_ct_results(self, cell_type, name):
+    def load_ct_results(self, cell_type):
         ct_results_dir = self.output_dir / f"cell_type_{cell_type}"
-        return np.load(ct_results_dir / f"{name}.npz")
+        return np.load(ct_results_dir / f"attributions.npy")
 
-    def save_node_embedding_attr_result(self, result, idx):
-        results_dir = self.output_dir / f"node_embedding"
-        results_dir.mkdir(exist_ok=True)
-
-        with gzip.GzipFile(results_dir / f"idx_{idx}.npy.gz", "w") as out_file:
-            np.save(out_file, arr=result)
-
-    def load_node_embedding_attr_result(self, idx):
-        results_dir = self.output_dir / f"node_embedding"
-
-        with gzip.GzipFile(results_dir / f"idx_{idx}.npy.gz", "r") as in_file:
-            results = np.load(in_file)
-
-        return results
-    
-    def load_embedding_index_list(self, cell_types=List[str]):
-        attributions = {
-        }
-        for cell_type in cell_types:
-            pass
-            # attributions[]
-
-    def find_domain_metagene_idx(self, cell_type, alpha=1.5):
-        attributions_dict = self.load_ct_results(cell_type, "top_metagenes")
-        attributions_mean = attributions_dict["mean_per_label"]
+    def find_domain_gene_idx(self, cell_type, pct=95):
+        attributions = self.load_ct_results(cell_type)
         
         adata_celltype = sc.read_h5ad(self.project / "clustering" / f"ST_cell_{cell_type}.h5ad")
         num_regions = adata_celltype.obs['leiden'].nunique()
+        regions = adata_celltype.obs['leiden'].to_numpy().astype(int)
         
-        return find_relevant_features(attributions_mean, num_regions, alpha)
-
-    def find_domain_gene_idx(self, cell_type, alpha=1.5):
-        attributions_dict = self.load_ct_results(cell_type, "top_genes")
-        attributions_mean = attributions_dict["mean_per_label"]
-        
-        adata_celltype = sc.read_h5ad(self.project / "clustering" / f"ST_cell_{cell_type}.h5ad")
-        num_regions = adata_celltype.obs['leiden'].nunique()
-        
-        return find_relevant_features(attributions_mean, num_regions, alpha)
-    
-    def find_ctsvgs(self, cell_type, alpha=1.5):
-        for i in range(num_vars):
-            # get feature i as fi 
-            pass
-            for j in range(embedding_dim):
-                # get metagene j as gj
-                # get attr of fi on gj as afi (attribution / node_embedding / idx_j.npy.gz
-                # get attr of gj on prediction as agj
-                # compute afgij = afi * agj
-            # compute ah    
-                pass            
-                # load attributions for embedding_dim
-                for k in range(num_regions):
-                    # load attributions for celltype
-                    pass
+        return find_relevant_features(attributions, regions, num_regions, pct)
 
 
-def find_relevant_features(attributions, num_indexes, alpha=1.5):
+def find_relevant_features(attributions, indexes, num_indexes, pct=95):
     """
     Find metagenes associated with cell spatial domains.
     """
-    attr_abs = [np.abs(attributions[i]) for i in range(num_indexes)]
-    attr_mean = [np.mean(attr_abs[i]) for i in range(num_indexes)]
-    attr_std = [np.std(attr_abs[i]) for i in range(num_indexes)]
-
-    # find features with attribution higher than mean + alpha*std
-    attr_high = [attr_abs[i] > attr_mean[i] + (alpha * attr_std[i]) for i in range(num_indexes)]
-    feature_idx = [attr_high[i].nonzero()[0] for i in range(num_indexes)]
-
-    # order by decreasing absolute value of attribution
-    feature_idx_order = [np.argsort(-attr_abs[i][feature_idx[i]]) for i in range(num_indexes)]
-    feature_idx = [feature_idx[i][feature_idx_order[i]] for i in range(num_indexes)]
+    attr_grps = [attributions[indexes == index] for index in range(num_indexes)]
+    pos_attr_grps = [np.where(attr_grps[i] > 0, attr_grps[i], 0) for i in range(num_indexes)]
+    neg_attr_grps = [np.where(attr_grps[i] < 0, attr_grps[i], 0) for i in range(num_indexes)]
     
-    return feature_idx
+    # set negative attributions as zero
+    pos_feat_idx, pos_attr_norms = find_impt_feature_idx(pos_attr_grps, num_indexes, pct)
+    neg_feat_idx, neg_attr_norms = find_impt_feature_idx(neg_attr_grps, num_indexes, pct)
 
+    return pos_feat_idx, neg_feat_idx, pos_attr_norms, neg_attr_norms
+
+def find_impt_feature_idx(attr_grps, num_groups, pct=95):
+    # compute norm for each group to summarize overall attribution of feature accross all samples in the classification
+    attr_grp_norms = [np.linalg.norm(attr_grps[i], axis=0) for i in range(num_groups)]    
+    
+    # attr_grp_mean = [np.mean(attr_grp_norms[i]) for i in range(num_groups)]
+    # attr_grp_std = [np.std(attr_grp_norms[i]) for i in range(num_groups)]
+
+    # Features with attribution norm higher than mean + alpha*std will be considered important
+    # attr_grp_impt = [attr_grp_norms[i] > attr_grp_mean[i] + (alpha * attr_grp_std[i]) for i in range(num_groups)]
+
+    # TODO categorize
+    # high pos low neg -> positive attribution
+    # high pos high neg -> case by case
+    # high neg low pos -> negative attribution
+    # log neg low pos -> irrelevant
+
+    # eliminate genes with low variance across groups
+    threshold = np.percentile(attr_grp_norms, pct)
+    attr_grp_impt = [attr_grp_norms[i] > threshold for i in range(num_groups)]
+    attr_grp_impt_feat_idx = [attr_grp_impt[i].nonzero()[0] for i in range(num_groups)]
+
+    # order by decreasing norm of attributions
+    attr_grp_impt_feat_idx_order = [np.argsort(-attr_grp_norms[i][attr_grp_impt_feat_idx[i]]) for i in range(num_groups)]
+    attr_grp_impt_feat_idx = [attr_grp_impt_feat_idx[i][attr_grp_impt_feat_idx_order[i]] for i in range(num_groups)]
+    
+    return attr_grp_impt_feat_idx, attr_grp_norms
+    
 
 
 def find_representative_embeddings(embeddings):
