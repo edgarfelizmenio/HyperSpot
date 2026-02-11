@@ -86,3 +86,4 @@ class HypergraphEmbedder(nn.Module, ABC):
 from .fusion import SpatialFusionEmbedder
 from .hgnn import HyFiEmbedder
 from .transformer import HGTransformerEmbedder
+from .cthgnn import CTHyFiEmbedder
