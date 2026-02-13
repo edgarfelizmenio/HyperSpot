@@ -3,8 +3,10 @@ import matplotlib.pyplot as plt
 import scanpy as sc
 import squidpy as sq
 
+from ..pipeline.utils import get_celltype_mapping
+
 def plot_ct_domains(project_dir, ct_key='cell_type', n_cols = 4, figsize: tuple = (20, 15)):
-    type_list = np.loadtxt(project_dir / "cell_types.txt", dtype=str)
+    type_list, _ = get_celltype_mapping(project_dir, ct_key) 
     n_cell_types = len(type_list)
 
     n_rows = (n_cell_types // n_cols) + (1 if (n_cell_types % n_cols) > 0 else 0)

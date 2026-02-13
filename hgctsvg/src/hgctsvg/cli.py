@@ -17,6 +17,7 @@ from .data import STHypergraphData
 from .dataset.hypergraph import STHypergraphListDataset
 
 from .pipeline import HypergraphEmbedderDriver, HypergraphEmbedderArgs, HGCTSVGClustering, SCEmbeddingSpatialClassifierDriver, Explainer, ExplainerArgs
+from .pipeline.utils import get_celltype_mapping
 
 app = App(name="hgctsvg")
 
@@ -131,7 +132,8 @@ def compute_celltype_spatial_domains(project: ProjectArgs,
 
     adata_decomp = sc.read_h5ad(project.project_dir / "ST_decomposition.h5ad")
     embedding = torch.load(project.project_dir / "node_embeddings.pth")
-    type_list = np.loadtxt(project.project_dir / "cell_types.txt", dtype=str)
+    type_list, _ = get_celltype_mapping(project.project_dir, 
+                                        data.cell_type_key)
  
     adata_decomp.obsm[data.embedding_key] = embedding.numpy()
     

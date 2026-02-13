@@ -27,6 +27,7 @@ from ..config import AcceleratorOptions
 from .utils import get_device
 
 from .classification import load_sc_classifier_input
+from .utils import get_celltype_mapping
 
 # identify important features
 # candidates
@@ -179,10 +180,8 @@ class Explainer(object):
         self.embedder.to(self.device)
         self.embedder.eval()
 
-        cell_types = np.loadtxt(self.project / "cell_types.txt", dtype=str)
-        ctidx = 0
-        while cell_types[ctidx] != cell_type:
-            ctidx += 1 
+        _, cell_type_mapping = get_celltype_mapping(self.project)
+        ct_idx = cell_type_mapping[cell_type]
                 
         hgdataset = STHypergraphMatrixDataset(hypergraph)
         _, classes, num_classes = load_sc_classifier_input(self.project, cell_type)
@@ -194,8 +193,8 @@ class Explainer(object):
         self.classifier.to(self.device)
         self.classifier.eval()
 
-        forward_fn = self.embedder.get_e2e_attribution_forward(self.classifier, num_repeats=2)
-        ig = DeepLift(forward_fn, multiply_by_inputs=True)
+        forward_fn = self.embedder.get_e2e_attribution_forward(self.classifier, num_repeats=1)
+        ig = IntegratedGradients(forward_fn, multiply_by_inputs=True)
         
         dataset = TensorDataset(ids, classes)
         loader = DataLoader(dataset, batch_size=explainer_args.batch_size, shuffle=False, drop_last=False)
@@ -215,7 +214,7 @@ class Explainer(object):
                 attribution_batch = ig.attribute(inputs, 
                                             target=batch_classes, 
                                             # n_steps=explainer_args.n_steps,
-                                            # internal_batch_size=inputs.shape[0],
+                                            internal_batch_size=inputs.shape[0],
                                             additional_forward_args = additional_forward_args)
                                                             
                 # attribution_batch = F.normalize(attribution_batch)
@@ -270,6 +269,7 @@ def find_relevant_features(attributions, indexes, num_indexes, pct=95):
     Find metagenes associated with cell spatial domains.
     """
     attr_grps = [attributions[indexes == index] for index in range(num_indexes)]
+    
     pos_attr_grps = [np.where(attr_grps[i] > 0, attr_grps[i], 0) for i in range(num_indexes)]
     neg_attr_grps = [np.where(attr_grps[i] < 0, attr_grps[i], 0) for i in range(num_indexes)]
     
@@ -282,7 +282,11 @@ def find_relevant_features(attributions, indexes, num_indexes, pct=95):
 def find_impt_feature_idx(attr_grps, num_groups, pct=95):
     # compute norm for each group to summarize overall attribution of feature accross all samples in the classification
     attr_grp_norms = [np.linalg.norm(attr_grps[i], axis=0) for i in range(num_groups)]    
+    threshold = [np.percentile(attr_grp_norms[i], pct) for i in range(num_groups)]
     
+    for i in range(num_groups):
+        print(i, threshold[i])
+        print(attr_grp_norms[i])
     # attr_grp_mean = [np.mean(attr_grp_norms[i]) for i in range(num_groups)]
     # attr_grp_std = [np.std(attr_grp_norms[i]) for i in range(num_groups)]
 
@@ -295,9 +299,10 @@ def find_impt_feature_idx(attr_grps, num_groups, pct=95):
     # high neg low pos -> negative attribution
     # log neg low pos -> irrelevant
 
+    
     # eliminate genes with low variance across groups
-    threshold = np.percentile(attr_grp_norms, pct)
-    attr_grp_impt = [attr_grp_norms[i] > threshold for i in range(num_groups)]
+
+    attr_grp_impt = [attr_grp_norms[i] > threshold[i] for i in range(num_groups)]
     attr_grp_impt_feat_idx = [attr_grp_impt[i].nonzero()[0] for i in range(num_groups)]
 
     # order by decreasing norm of attributions

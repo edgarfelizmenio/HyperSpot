@@ -1,6 +1,8 @@
 import torch
 from torch_geometric.nn import knn_graph
 
+from ..pipeline.utils import create_celltype_mapping, get_celltype_mapping
+
 def extract_sc_patient_data(adata, patient_id):
     adata = adata[adata.obs['patient'] == patient_id].copy()
     return adata
@@ -29,17 +31,7 @@ def extract_st_patient_data(adata, patient_id):
         
     return adata
 
-def create_cell_type_mapping(adata_decomp, key_type='cell_type'):
-    type_list = sorted(list(adata_decomp.obs[key_type].unique().astype(str)))
-
-    cell_type_mapping = {
-        cell_type:i for i, cell_type in enumerate(type_list) 
-    }
-
-    return type_list, cell_type_mapping
-
-
-def create_hypergraph_data(adata_decomp, adata_st, num_neighbor_spots=7):
+def create_hypergraph_data(project_dir, adata_decomp, adata_st, num_neighbor_spots=7):
     cell_feats = torch.tensor(adata_decomp.X, dtype=torch.float)
     spot_feats = torch.tensor(adata_st.X.toarray(), dtype=torch.float)
 
@@ -52,7 +44,9 @@ def create_hypergraph_data(adata_decomp, adata_st, num_neighbor_spots=7):
     cell_to_spot_id = adata_decomp.obs['spot_name'].map(spot_name_to_index).to_numpy()
     cell_to_spot_id = torch.from_numpy(cell_to_spot_id)
 
-    type_list, cell_type_mapping = create_cell_type_mapping(adata_decomp)
+    create_celltype_mapping(project_dir, adata_decomp)
+    type_list, cell_type_mapping = get_celltype_mapping(project_dir)
+    
     cell_types = adata_decomp.obs['cell_type'].map(cell_type_mapping).to_numpy()
     cell_types = torch.from_numpy(cell_types)
     
