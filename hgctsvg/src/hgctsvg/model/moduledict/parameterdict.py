@@ -9,8 +9,9 @@ class ParameterDict(nn.Module):
         self.output_dim = output_dim
         self.params = nn.Embedding(num_keys, output_dim)
 
-    def reset_parameters():
+    def reset_parameters(self):
         self.params.reset_parameters()
+        nn.init.zeros_(self.params.weight)
     
     def forward(self, keys):
         """

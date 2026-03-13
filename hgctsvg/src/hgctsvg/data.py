@@ -2,6 +2,8 @@ import torch
 
 from pathlib import Path
 
+from .metadata import ProjectMetadata
+
 class STHypergraphData(object):
     def __init__(self,
                 cell_feats,
@@ -26,12 +28,14 @@ class STHypergraphData(object):
     def __getitem__(self, key):
         return self._data[key]
     
-    def save(self, project_results_dir: Path):
-        torch.save(self._data, project_results_dir / "hypergraph.pth")
+    def save(self):
+        proj_metadata = ProjectMetadata()
+        torch.save(self._data, proj_metadata.project_folder / "hypergraph.pth")
     
     @staticmethod
-    def load(project_results_dir: Path):
-        data = torch.load(project_results_dir / "hypergraph.pth")
+    def load():
+        proj_metadata = ProjectMetadata()
+        data = torch.load(proj_metadata.project_folder / "hypergraph.pth")
         return STHypergraphData(
             data["cell_feats"],
             data["hyperedge_feats"],
@@ -42,6 +46,7 @@ class STHypergraphData(object):
             data["num_cell_types"],
             data["num_spots"]
         )
+
 
 def get_ids_per_celltype(data: STHypergraphData):
     per_celltype_idx = [

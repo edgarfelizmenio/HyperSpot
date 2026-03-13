@@ -17,17 +17,21 @@ from captum.attr import IntegratedGradients, DeepLift
 from torch.utils.data import DataLoader, TensorDataset
 from torch.utils.data.sampler import BatchSampler, SequentialSampler
 
+from ..config import AcceleratorOptions
+
 from ..data import STHypergraphData, get_ids_per_celltype, get_celltype_ids
 from ..dataset.hypergraph import STHypergraphMatrixDataset, STHypergraphBatchMatrixData
 
+from ..metadata import ProjectMetadata
+
 from ..model.classifier import EmbeddingClassifier, EmbeddingClassifierArgs
 from ..model.hypergraph import HypergraphEmbedder, HypergraphEmbedderArgs
+from ..utils import load_ct_spatial_data
 
-from ..config import AcceleratorOptions
+
 from .utils import get_device
 
 from .classification import load_sc_classifier_input
-from .utils import get_celltype_mapping
 
 # identify important features
 # candidates
@@ -43,11 +47,8 @@ class ExplainerArgs:
     accelerator: AcceleratorOptions
 
 class Explainer(object):
-    def __init__(self, project):
-        self.project = project
-        
-        self.output_dir = self.project / "attribution"
-        self.output_dir.mkdir(exist_ok=True)
+    def __init__(self):
+        pass
             
     def compute_spatial_domain_genes(self):
         raise NotImplementedError()
@@ -171,30 +172,39 @@ class Explainer(object):
                           cell_type,
                           hypergraph: STHypergraphData,
                           embedder_args: HypergraphEmbedderArgs,
+                          dropout,
                           num_layers,
                           explainer_args: ExplainerArgs):
 
+        project_metadata = ProjectMetadata()
+        
         self.device = get_device(explainer_args.accelerator)
-        self.embedder = HypergraphEmbedder.build(self.project, embedder_args)
-        self.embedder.load_checkpoint(self.project)
+        self.embedder = HypergraphEmbedder.build(embedder_args)
+        self.embedder.load_checkpoint()
         self.embedder.to(self.device)
         self.embedder.eval()
 
-        _, cell_type_mapping = get_celltype_mapping(self.project)
+        cell_type_mapping = project_metadata.ct_mapping
         ct_idx = cell_type_mapping[cell_type]
                 
         hgdataset = STHypergraphMatrixDataset(hypergraph)
-        _, classes, num_classes = load_sc_classifier_input(self.project, cell_type)
-        ids = get_celltype_ids(hypergraph, ctidx)
+        _, classes, num_classes = load_sc_classifier_input(cell_type)
+        ids = get_celltype_ids(hypergraph, ct_idx)
 
-        classifier_args = EmbeddingClassifierArgs(cell_type, embedder_args.embedding_dim, num_classes, num_layers)
+        classifier_args = EmbeddingClassifierArgs(cell_type, 
+                                                  embedder_args.embedding_dim, 
+                                                  num_classes,
+                                                  dropout, 
+                                                  num_layers)
         self.classifier = EmbeddingClassifier(classifier_args)
-        self.classifier.load_checkpoint(self.project)
+        self.classifier.load_checkpoint()
         self.classifier.to(self.device)
         self.classifier.eval()
 
         forward_fn = self.embedder.get_e2e_attribution_forward(self.classifier, num_repeats=1)
-        ig = IntegratedGradients(forward_fn, multiply_by_inputs=True)
+        ig = IntegratedGradients(forward_fn, multiply_by_inputs=False)
+
+        print(ids.shape, classes.shape)
         
         dataset = TensorDataset(ids, classes)
         loader = DataLoader(dataset, batch_size=explainer_args.batch_size, shuffle=False, drop_last=False)
@@ -202,23 +212,21 @@ class Explainer(object):
         attribution_batches = []
         with tqdm(loader, leave=False, position=0) as batch_pbar:
             for batch_ids, batch_classes in batch_pbar:
-                print(batch_classes.shape)
                 hg_batch = hgdataset[batch_ids.tolist()]
-
+                
                 hg_batch = hg_batch.to_device(self.device)
                 inputs, additional_forward_args = self.embedder.get_e2e_attribution_inputs(hg_batch)        
                 # inputs = inputs.to(self.device)
                 # incidence_matrix = additional_forward_args[0].to(self.device)
                 # batch_size = additional_forward_args[1]
                 batch_classes = batch_classes.to(self.device)
+
                 attribution_batch = ig.attribute(inputs, 
                                             target=batch_classes, 
-                                            # n_steps=explainer_args.n_steps,
+                                            n_steps=explainer_args.n_steps,
                                             internal_batch_size=inputs.shape[0],
                                             additional_forward_args = additional_forward_args)
-                                                            
-                # attribution_batch = F.normalize(attribution_batch)
-
+                
                 attribution_batch = attribution_batch[:hg_batch.sample_n_cells]
                 attribution_batches.append(attribution_batch)
         
@@ -226,49 +234,70 @@ class Explainer(object):
 
         assert attributions.shape[0] == ids.shape[0]
         assert attributions.shape[0] == classes.shape[0]
+        # assert torch.all(torch.any(attributions != 0, dim=1))
         
-        # process attributions
-        # group by label and compute mean attribution per label
-        classes = classes.view(classes.size(0), 1).expand(-1, attributions.size(1)).to(attributions.device)
-        unique_classes, classes_count = classes.unique(dim=0, return_counts=True)
-
-        attr_cell_type = {}
-
-        total_attr_per_label = torch.zeros_like(unique_classes, 
-                                                dtype=torch.float, 
-                                                device=self.device).scatter_add(0, classes, attributions)
-        
-        mean_attr_per_label = total_attr_per_label / classes_count.float().unsqueeze(1)
-
         attributions = attributions.detach().cpu().numpy()
-
+        
         self.save_ct_result(cell_type, attributions)
         
     def save_ct_result(self, cell_type, result_data: np.ndarray):
-        ct_results_dir = self.output_dir / f"cell_type_{cell_type}"
+        project_metadata = ProjectMetadata()
+        ct_results_dir = project_metadata.attr_dir / f"cell_type_{cell_type}"
         ct_results_dir.mkdir(exist_ok=True)
 
         np.save(ct_results_dir / f"attributions.npy", result_data)
 
     def load_ct_results(self, cell_type):
-        ct_results_dir = self.output_dir / f"cell_type_{cell_type}"
+        project_metadata = ProjectMetadata()
+        ct_results_dir = project_metadata.attr_dir / f"cell_type_{cell_type}"
         return np.load(ct_results_dir / f"attributions.npy")
 
     def find_domain_gene_idx(self, cell_type, pct=95):
+        project_metadata = ProjectMetadata()
+        
         attributions = self.load_ct_results(cell_type)
         
-        adata_celltype = sc.read_h5ad(self.project / "clustering" / f"ST_cell_{cell_type}.h5ad")
+        adata_celltype = load_ct_spatial_data(cell_type)
         num_regions = adata_celltype.obs['leiden'].nunique()
         regions = adata_celltype.obs['leiden'].to_numpy().astype(int)
         
         return find_relevant_features(attributions, regions, num_regions, pct)
+        # return find_relevant_features2(attributions, adata_celltype.X, regions, num_regions, pct)
 
+def find_relevant_features2(attributions, expression, indexes, num_indexes, pct=95):
+    """
+    Find metagenes associated with cell spatial domains.
+    """
+    attr_grps = [attributions[indexes == i] for i in range(num_indexes)]
+    expr_grps = [expression[indexes == i] for i in range(num_indexes)]
+
+    attr_grp_sums = [(attr_grps[i] * expr_grps[i]).sum(axis=0) for i in range(num_indexes)]
+    expr_grp_sums = [expr_grps[i].sum(axis=0) for i in range(num_indexes)]
+
+    grp_weighted_mean = [
+        np.divide(attr_grp_sums[i], expr_grp_sums[i],
+                  out=np.zeros_like(attr_grp_sums[i], dtype=float),
+                  where=expr_grp_sums[i] > 1e-8)
+        for i in range(num_indexes)
+    ]    
+
+    threshold = [np.percentile(grp_weighted_mean[i], pct) for i in range(num_indexes)]
+
+    # eliminate genes with low variance across groups
+    attr_grp_impt = [grp_weighted_mean[i] > threshold[i] for i in range(num_indexes)]
+    attr_grp_impt_feat_idx = [attr_grp_impt[i].nonzero()[0] for i in range(num_indexes)]
+
+    # order by decreasing norm of attributions
+    attr_grp_impt_feat_idx_order = [np.argsort(-grp_weighted_mean[i][attr_grp_impt_feat_idx[i]]) for i in range(num_indexes)]
+    attr_grp_impt_feat_idx = [attr_grp_impt_feat_idx[i][attr_grp_impt_feat_idx_order[i]] for i in range(num_indexes)]
+    
+    return attr_grp_impt_feat_idx, grp_weighted_mean
 
 def find_relevant_features(attributions, indexes, num_indexes, pct=95):
     """
     Find metagenes associated with cell spatial domains.
     """
-    attr_grps = [attributions[indexes == index] for index in range(num_indexes)]
+    attr_grps = [attributions[indexes == i] for i in range(num_indexes)]
     
     pos_attr_grps = [np.where(attr_grps[i] > 0, attr_grps[i], 0) for i in range(num_indexes)]
     neg_attr_grps = [np.where(attr_grps[i] < 0, attr_grps[i], 0) for i in range(num_indexes)]
@@ -283,10 +312,10 @@ def find_impt_feature_idx(attr_grps, num_groups, pct=95):
     # compute norm for each group to summarize overall attribution of feature accross all samples in the classification
     attr_grp_norms = [np.linalg.norm(attr_grps[i], axis=0) for i in range(num_groups)]    
     threshold = [np.percentile(attr_grp_norms[i], pct) for i in range(num_groups)]
-    
-    for i in range(num_groups):
-        print(i, threshold[i])
-        print(attr_grp_norms[i])
+
+    # apply log transformation
+    attr_grp_norms = [np.log(attr_grp_norms[i] + 1) for i in range(num_groups)]
+
     # attr_grp_mean = [np.mean(attr_grp_norms[i]) for i in range(num_groups)]
     # attr_grp_std = [np.std(attr_grp_norms[i]) for i in range(num_groups)]
 
@@ -299,19 +328,16 @@ def find_impt_feature_idx(attr_grps, num_groups, pct=95):
     # high neg low pos -> negative attribution
     # log neg low pos -> irrelevant
 
-    
     # eliminate genes with low variance across groups
-
     attr_grp_impt = [attr_grp_norms[i] > threshold[i] for i in range(num_groups)]
     attr_grp_impt_feat_idx = [attr_grp_impt[i].nonzero()[0] for i in range(num_groups)]
 
     # order by decreasing norm of attributions
     attr_grp_impt_feat_idx_order = [np.argsort(-attr_grp_norms[i][attr_grp_impt_feat_idx[i]]) for i in range(num_groups)]
     attr_grp_impt_feat_idx = [attr_grp_impt_feat_idx[i][attr_grp_impt_feat_idx_order[i]] for i in range(num_groups)]
+    attr_grp_norms = [[attr_grp_norms[i][j] for j in attr_grp_impt_feat_idx[i]] for i in range(num_groups)]
     
     return attr_grp_impt_feat_idx, attr_grp_norms
-    
-
 
 def find_representative_embeddings(embeddings):
     # compute centroid (mean embedding)

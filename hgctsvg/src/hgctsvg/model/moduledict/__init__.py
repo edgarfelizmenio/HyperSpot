@@ -1,2 +1,2 @@
-from .lineardict import LinearDict, MLPDict
+from .lineardict import LinearDict, LinearDictLora, MLPDict
 from .parameterdict import ParameterDict

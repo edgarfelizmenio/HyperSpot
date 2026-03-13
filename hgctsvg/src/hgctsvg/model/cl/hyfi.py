@@ -231,8 +231,6 @@ class HyFiLoss(nn.Module):
 
         return batch_cl
 
-
-
 class HyFi(nn.Module):
     def __init__(self, encoder, embedding_dim, num_views=2):
         super(HyFi, self).__init__()
@@ -258,21 +256,38 @@ class HyFi(nn.Module):
         # forward on data with noise
         for i in range(self.num_views):
             perturbed_cell_feats = self.__add_gaussian_noise(batch.batch_cell_feats)
-            # augmented_node_embeddings[i], augmented_hyperedge_embeddings[i] = self.encoder(perturbed_node_feats,
-            #                                                                                hyperedge_ids,
-            #                                                                                incidence_matrix)
             augmented_node_embeddings[i], augmented_hyperedge_embeddings[i] = self.encoder(batch._replace(batch_cell_feats=perturbed_cell_feats))
-
-
         
         return node_embeddings, hyperedge_embeddings, augmented_node_embeddings, augmented_hyperedge_embeddings
-        # total_contrastive_loss = HyFiLoss(node_embeddings, 
-        #                                   hyperedge_embeddings, 
-        #                                   augmented_node_embeddings, 
-        #                                   augmented_hyperedge_embeddings)
+ 
+class HyFiAE(nn.Module):
+    def __init__(self, 
+                 encoder, 
+                 embedding_dim,
+                 num_views=2):
+        super(HyFiAE, self).__init__()
+        self.encoder = encoder
+        self.embedding_dim = embedding_dim
+        self.num_views = num_views
 
-
-        
-        # return total_contrastive_loss
+    def __add_gaussian_noise(self, node_feats, std=0.1):
+        noise = torch.normal(0, std, size=node_feats.size()).to(node_feats.device)
+        aug_feats = torch.where(node_feats - noise < 0, node_feats + noise, node_feats - noise)
+        return aug_feats
     
+    def forward(self, batch):
+        # forward on original data
+        node_embeddings, hyperedge_embeddings, reconstruction = self.encoder(batch)
+        
+        # make multiple views
+        # augmented_node_embeddings = torch.zeros((self.num_views, batch.batch_subgraph_cells.shape[0], self.embedding_dim)).to(batch.batch_cell_feats.device)
+        # augmented_hyperedge_embeddings = torch.zeros((self.num_views, batch.batch_subgraph_hyperedges.shape[0], self.embedding_dim)).to(batch.batch_cell_feats.device)
+
+        # forward on data with noise
+        # for i in range(self.num_views):
+        #     perturbed_cell_feats = self.__add_gaussian_noise(batch.batch_cell_feats)
+        #     augmented_node_embeddings[i], augmented_hyperedge_embeddings[i], _ = self.encoder(batch._replace(batch_cell_feats=perturbed_cell_feats))
+
+        return node_embeddings, hyperedge_embeddings, reconstruction
+        # return node_embeddings, hyperedge_embeddings, augmented_node_embeddings, augmented_hyperedge_embeddings, reconstruction
     

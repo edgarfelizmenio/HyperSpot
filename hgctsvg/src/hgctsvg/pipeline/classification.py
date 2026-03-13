@@ -13,9 +13,12 @@ from tqdm import tqdm
 
 from torch.utils.data import TensorDataset, DataLoader
 
-from ..model.classifier import EmbeddingClassifier, EmbeddingClassifierArgs
-
 from ..config import AcceleratorOptions
+
+from ..metadata import ProjectMetadata
+from ..model.classifier import EmbeddingClassifier, EmbeddingClassifierArgs
+from ..utils import load_ct_spatial_data
+
 from .utils import get_device
 
 logger = logging.getLogger(__name__)
@@ -24,45 +27,47 @@ class STEmbeddingSpatialClassifierTrainer(object):
     pass
 
 class SCEmbeddingSpatialClassifierDriver(object):
-    def __init__(self,
-                 project: Path):
-
-        self.project = project
-        self.output_dir = project / "classifiers"
-        self.output_dir.mkdir(exist_ok=True)
+    def __init__(self):
+        pass
     
-    def load_sc_classifier_inputs(self, project: Path):
-        cell_types = np.loadtxt(project / "cell_types.txt", dtype=str)
+    def load_sc_classifier_inputs(self):
+        project_metadata = ProjectMetadata()
+        
+        # cell_types = np.loadtxt(project_metadata. / "cell_types.txt", dtype=str)
+        cell_types = project_metadata.ct_list
         cell_type_embeddings = {}
         cell_type_classes = {}
         cell_type_num_classes = {}
         for cell_type in tqdm(cell_types, desc="Loading classifier input for each cell type..."):
             
-            embeddings, classes, num_classes = load_sc_classifier_input(project, cell_type)
+            embeddings, classes, num_classes = load_sc_classifier_input(cell_type)
             
             cell_type_embeddings[cell_type] = embeddings
             cell_type_classes[cell_type] = classes
             cell_type_num_classes[cell_type] = num_classes
     
-        return cell_types, cell_type_embeddings, cell_type_classes, cell_type_num_classes
+        return cell_type_embeddings, cell_type_classes, cell_type_num_classes
     
     def train_sc_embedding_classifiers(self,
                                        input_dim: int,
                                        num_layers: int,
+                                       dropout: float,
                                        num_epochs: int,
                                        batch_size: int,
                                        accelerator: AcceleratorOptions):
-    
-        cell_types, embeddings, classes, cell_type_num_classes = self.load_sc_classifier_inputs(self.project)
+        project_metadata = ProjectMetadata()
+        cell_types = project_metadata.ct_list
+        
+        embeddings, classes, cell_type_num_classes = self.load_sc_classifier_inputs()
         
         with tqdm(cell_types, desc="Training classifiers for each cell type...") as cell_type_pbar:
             for cell_type in cell_type_pbar:
                 classifier_args = EmbeddingClassifierArgs(cell_type,
                                                           input_dim,
                                                           cell_type_num_classes[cell_type],
+                                                          dropout,
                                                           num_layers)
-                trainer = SCEmbeddingSpatialClassifierTrainer(self.output_dir,
-                                                              cell_type,
+                trainer = SCEmbeddingSpatialClassifierTrainer(cell_type,
                                                               classifier_args)
                 trainer.fit(embeddings[cell_type],
                             classes[cell_type],
@@ -72,14 +77,10 @@ class SCEmbeddingSpatialClassifierDriver(object):
 
 class SCEmbeddingSpatialClassifierTrainer(object):
     def __init__(self,
-                 output_dir: Path,
                  cell_type: str,
                  classifier_args: EmbeddingClassifierArgs):
 
-        self.output_dir = output_dir
-
-        self.cell_type = cell_type
-        
+        self.cell_type = cell_type        
         logger.info("Initializing model...")
 
         self.model = EmbeddingClassifier(classifier_args)
@@ -94,6 +95,8 @@ class SCEmbeddingSpatialClassifierTrainer(object):
             batch_size: int,
             accelerator: AcceleratorOptions,
             pbar_position=0):
+        project_metadata = ProjectMetadata()
+        
         self.device = get_device(accelerator)
 
         self.model.to(self.device)
@@ -121,7 +124,8 @@ class SCEmbeddingSpatialClassifierTrainer(object):
                         'optimizer_state_dict': self.optimizer.state_dict(),
                         'loss': min_epoch_loss
                     }
-                    torch.save(checkpoint, self.output_dir / f'cell_{self.cell_type}.pth')
+                    torch.save(checkpoint, 
+                               project_metadata.classifier_dir / f'cell_{self.cell_type}.pth')
                 
                 e_pbar.set_postfix({
                     'epoch_loss': epoch_loss,
@@ -155,12 +159,16 @@ class SCEmbeddingSpatialClassifierTrainer(object):
         loss = self.criterion(batch_out, batch_y)
         return loss
 
-def load_sc_classifier_input(project: Path, 
-                             cell_type: str):
-    adata_cell_type = sc.read_h5ad(project / "clustering" / f"ST_cell_{cell_type}.h5ad")
+def load_sc_classifier_input(cell_type: str):
+    project_metadata = ProjectMetadata()
     
-    embeddings = torch.from_numpy(adata_cell_type.obsm["embedding"])
-    classes = torch.from_numpy(adata_cell_type.obs["leiden"].to_numpy(dtype=int))
-    num_classes = adata_cell_type.obs["leiden"].nunique()
+    adata_ct = load_ct_spatial_data(cell_type)
+    
+    embeddings = torch.from_numpy(adata_ct.obsm["embedding"])
+    classes = torch.from_numpy(adata_ct.obs["leiden"].to_numpy(dtype=int))
+    num_classes = adata_ct.obs["leiden"].nunique()
 
     return embeddings, classes, num_classes 
+
+def test_classifier(project: Path, cell_type: str):
+    pass

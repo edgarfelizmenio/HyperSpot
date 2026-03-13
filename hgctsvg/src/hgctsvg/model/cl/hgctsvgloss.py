@@ -4,19 +4,39 @@ import torch.nn as nn
 
 from tqdm import tqdm
 
-# intraclass temp = 1.0 -> more spatial domains
-# intraclass temp = 0.1 -> less spatial domains
-class HGCTSVGLoss(nn.Module):
+from ..moduledict import LinearDict
+
+class ClassSpecificProjection(nn.Module):
     def __init__(self,
                  input_dim,
+                 n_classes,
+                 projection_dim = 100):
+        super(ClassSpecificProjection, self).__init__()
+        self.proj1 = LinearDict(n_classes, input_dim, projection_dim, bias=True)
+        self.act = nn.ELU()
+        self.proj2 = LinearDict(n_classes, projection_dim, input_dim, bias=True)
+    
+    def forward(self, X, classes):
+        # classes = classes.unsqueeze(0).expand(2,-1)
+        z = self.proj1(X, classes)
+        z = self.act(z)
+        z = self.proj2(z, classes)
+        return z
+
+# intraclass temp = 1.0 -> more spatial domains
+# intraclass temp = 0.1 -> less spatial domains
+class HGCTLoss(nn.Module):
+    def __init__(self,
+                 input_dim,
+                 n_classes,
                  projection_dim = 100,
                  temp_interclass = 0.5,
-                 temp_intraclass = 1.0,
+                 temp_intraclass = 0.1,
                  temp_hyperedge = 0.5,
-                 alpha = 1.0,
+                 alpha = 2.0,
                  beta = 1.0,
                  gamma = 1.0):
-        super(HGCTSVGLoss, self).__init__()
+        super(HGCTLoss, self).__init__()
 
         self.temp_interclass = temp_interclass
         self.temp_intraclass = temp_intraclass
@@ -25,11 +45,14 @@ class HGCTSVGLoss(nn.Module):
         self.beta = beta
         self.gamma = gamma
 
-        self.project_nodes = nn.Sequential(
-            nn.Linear(input_dim, projection_dim),
-            nn.ELU(),
-            nn.Linear(projection_dim , input_dim)
-        )
+        # self.project_nodes_inter = nn.Sequential(
+        #     nn.Linear(input_dim, projection_dim),
+        #     nn.ELU(),
+        #     nn.Linear(projection_dim , input_dim)
+        # )
+
+        self.project_nodes = ClassSpecificProjection(input_dim, n_classes, projection_dim)
+        
         self.project_hyperedges = nn.Sequential(
             nn.Linear(input_dim, projection_dim),
             nn.ELU(),
@@ -48,6 +71,7 @@ class HGCTSVGLoss(nn.Module):
         
         return similarity, cross_view_similarity
 
+        
     def __compute_interclass_cl(self, similarity, same_class_mask):
         pos_pair_sim = similarity * same_class_mask
         pos_pair_loss = (pos_pair_sim / self.temp_interclass).exp()
@@ -102,10 +126,11 @@ class HGCTSVGLoss(nn.Module):
                 sample_n_hyperedges = None):
 
         # project (two-layer MLP with ELU activation)
-        node_projections = self.project_nodes(node_embeddings)
+        node_projections = self.project_nodes(node_embeddings, classes)
         hyperedge_projections = self.project_hyperedges(hyperedge_embeddings)
 
-        augmented_node_projections = self.project_nodes(augmented_node_embeddings)
+        augmented_classes = classes.unsqueeze(0).expand(augmented_node_embeddings.shape[0],-1)
+        augmented_node_projections = self.project_nodes(augmented_node_embeddings, augmented_classes)
         augmented_hyperedge_projections = self.project_hyperedges(augmented_hyperedge_embeddings)
 
         # incidence_matrix = incidence_matrix.to_sparse()        
@@ -113,12 +138,16 @@ class HGCTSVGLoss(nn.Module):
         node_commonality = incidence_matrix @ incidence_matrix.t()
         hyperedge_commonality = incidence_matrix.t() @ incidence_matrix
 
-        node_similarity, node_cross_view_similarity = self.__compute_similarity_matrices(node_projections, augmented_node_projections)
+        node_similarity, node_cross_view_similarity = self.__compute_similarity_matrices(node_projections,
+                                                                                         augmented_node_projections)
         node_interclass_cl = self.__compute_interclass_cl(node_similarity, same_class_mask)
-        node_intraclass_cl = self.__compute_hyfi_cl(node_similarity, node_cross_view_similarity, node_commonality, self.temp_intraclass, same_class_mask)
+        node_intraclass_cl = self.__compute_hyfi_cl(node_similarity, node_cross_view_similarity, node_commonality, 
+                                                    self.temp_intraclass, same_class_mask)
 
-        hyperedge_similarity, hyperedge_cross_view_similarity = self.__compute_similarity_matrices(hyperedge_projections, augmented_hyperedge_projections)
-        hyperedge_level_cl = self.__compute_hyfi_cl(hyperedge_similarity, hyperedge_cross_view_similarity, hyperedge_commonality, self.temp_hyperedge)
+        hyperedge_similarity, hyperedge_cross_view_similarity = self.__compute_similarity_matrices(hyperedge_projections,
+                                                                                                   augmented_hyperedge_projections)
+        hyperedge_level_cl = self.__compute_hyfi_cl(hyperedge_similarity, hyperedge_cross_view_similarity, 
+                                                    hyperedge_commonality, self.temp_hyperedge)
         
         if sample_n_cells:
             # limit error computation to the sampled batch
@@ -392,3 +421,63 @@ class IntraClassContrastiveLoss(nn.Module):
         batch_cl = node_level_cl.mean() + self.alpha * hyperedge_level_cl.mean()
         
         return batch_cl
+
+class HGCTCAELoss(nn.Module):
+    def __init__(self,
+                 input_dim,
+                 n_classes,
+                 projection_dim = 100,
+                 temp_interclass = 0.5,
+                 temp_intraclass = 0.5,
+                 temp_hyperedge = 0.5,
+                 alpha = 1.0,
+                 beta = 1.0,
+                 gamma = 1.0,
+                 rho = 1.0):
+        super(HGCTCAELoss, self).__init__()
+        self.hgctloss = HGCTLoss(input_dim,
+                                 n_classes,
+                                 projection_dim,
+                                 temp_interclass,
+                                 temp_intraclass,
+                                 temp_hyperedge,
+                                 alpha,
+                                 beta,
+                                 gamma)
+        self.rho = rho
+        self.reconloss = nn.MSELoss(reduction='mean')
+
+    def forward(self, 
+                orig_feats,
+                recon_feats,
+                # node_embeddings, 
+                # hyperedge_embeddings, 
+                # augmented_node_embeddings, 
+                # augmented_hyperedge_embeddings,
+                # incidence_matrix,
+                classes,
+                sample_n_cells = None,
+                sample_n_hyperedges = None):
+  
+        # batch_cl = self.hgctloss(node_embeddings, 
+        #                          hyperedge_embeddings, 
+        #                          augmented_node_embeddings, 
+        #                          augmented_hyperedge_embeddings,
+        #                          incidence_matrix,
+                                 # classes,
+        #                          sample_n_cells,
+        #                          sample_n_hyperedges)
+
+        observed_classes = torch.unique(classes)
+        n_observed_classes = observed_classes.numel()
+
+        total_recon_loss = 0
+        for c in observed_classes:
+            orig_feats_c = orig_feats[classes == c]
+            recon_feats_c = recon_feats[classes == c]
+            total_recon_loss += self.reconloss(orig_feats_c, recon_feats_c)
+
+        mean_recon_loss = total_recon_loss / n_observed_classes
+        
+        return self.rho * mean_recon_loss
+        # return batch_cl + self.rho * mean_recon_loss

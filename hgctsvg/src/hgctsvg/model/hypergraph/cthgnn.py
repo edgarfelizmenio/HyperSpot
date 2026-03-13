@@ -4,10 +4,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from . import HypergraphEmbedder, HypergraphEmbedderArgs
-from ..moduledict import LinearDict, ParameterDict
+from ..moduledict import LinearDict, LinearDictLora, ParameterDict
 
 class CTHyFiHGNNv1(nn.Module):
-    def __init__(self, input_dim, embedding_dim, dropout = 0.1):
+    def __init__(self, input_dim, embedding_dim, dropout = 0.1, node_act=nn.PReLU, hyperedge_act=nn.PReLU):
         super(CTHyFiHGNNv1, self).__init__()
         # perform node-edge-node feature transform
 
@@ -17,13 +17,15 @@ class CTHyFiHGNNv1(nn.Module):
         self.node_emb_weight = nn.Linear(embedding_dim, embedding_dim, bias=False)
         self.node_emb_bias = ParameterDict(12, embedding_dim)
         self.dropout = nn.Dropout(dropout)
-        self.act = nn.PReLU()
-
+        self.node_act = node_act()
+        self.hyperedge_act = hyperedge_act()
+        
         self.reset_parameters()
 
     def reset_parameters(self):
         self.hyperedge_emb_weight.reset_parameters()
         self.node_emb_weight.reset_parameters()
+        self.node_emb_bias.reset_parameters()
 
     def forward(self, node_feats, cell_types, incidence_matrix):
         dv = incidence_matrix.sum(dim=1) 
@@ -37,12 +39,12 @@ class CTHyFiHGNNv1(nn.Module):
         # node_feats = self.dropout(node_feats)
 
         hyperedge_embeddings = de_inv @ incidence_matrix.t() @ dv_invsqrt @ self.hyperedge_emb_weight(node_feats, cell_types) + self.hyperedge_emb_bias
-        hyperedge_embeddings = self.act(hyperedge_embeddings)
+        hyperedge_embeddings = self.hyperedge_act(hyperedge_embeddings)
         hyperedge_embeddings = self.dropout(hyperedge_embeddings)
         
         # TODO: check if node activation necessary
         node_embeddings = dv_invsqrt @ incidence_matrix @ self.node_emb_weight(hyperedge_embeddings) + self.node_emb_bias(cell_types)
-        node_embeddings = self.act(node_embeddings)        
+        node_embeddings = self.node_act(node_embeddings)        
 
         return node_embeddings, hyperedge_embeddings
 
@@ -100,7 +102,6 @@ class CTHyFiEmbedder(HypergraphEmbedder):
 
                 classes = self.classifier(embedding)
 
-                print(classes.shape, embedding.shape)
                 return classes
         
         explainer_classifier = ExplainerClassifier(self, classifier, index)

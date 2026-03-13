@@ -10,6 +10,8 @@ from typing import Dict, Optional, Callable, Tuple
 
 from pathlib import Path
 
+from ...metadata import ProjectMetadata
+
 @dataclass
 class HypergraphEmbedderArgs:
     model_name: str
@@ -33,8 +35,9 @@ class HypergraphEmbedder(nn.Module, ABC):
     def forward(self, batch):
         raise NotImplementedError
 
-    def load_checkpoint(self, project):
-        path = project / f'{self.checkpoint_name()}.pth'
+    def load_checkpoint(self):
+        project_metadata = ProjectMetadata()
+        path = project_metadata.project_folder / f'{self.checkpoint_name()}.pth'
         state = torch.load(path, weights_only=True)
         self.load_state_dict(state['embedder_state_dict'])
     
@@ -52,7 +55,7 @@ class HypergraphEmbedder(nn.Module, ABC):
         return list(cls._registry.keys())
     
     @classmethod
-    def build(cls, project_dir: Path, args: HypergraphEmbedderArgs) -> HypergraphEmbedder:
+    def build(cls, args: HypergraphEmbedderArgs) -> HypergraphEmbedder:
         try:
             subcls = cls._registry[args.model_name]
         except KeyError:
@@ -87,3 +90,4 @@ from .fusion import SpatialFusionEmbedder
 from .hgnn import HyFiEmbedder
 from .transformer import HGTransformerEmbedder
 from .cthgnn import CTHyFiEmbedder
+from .cthgcae import CTHGCAEEmbedder

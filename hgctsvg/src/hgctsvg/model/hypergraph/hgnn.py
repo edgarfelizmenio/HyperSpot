@@ -32,9 +32,11 @@ class HyFiHGNN(nn.Module):
         de_inv = (de**-1).diag()
         de_inv[de_inv == float('inf')] = 0
 
-        node_feats = self.dropout(node_feats)
+        # node_feats = self.dropout(node_feats)
+        
         hyperedge_embeddings = de_inv @ incidence_matrix.t() @ dv_invsqrt @ self.hyperedge_emb_weight(node_feats) + self.hyperedge_emb_bias
         hyperedge_embeddings = self.act(hyperedge_embeddings)
+        hyperedge_embeddings = self.dropout(hyperedge_embeddings)
 
         node_embeddings = dv_invsqrt @ incidence_matrix @ self.node_emb_weight(hyperedge_embeddings) + self.node_emb_bias
         node_embeddings = self.act(node_embeddings)        

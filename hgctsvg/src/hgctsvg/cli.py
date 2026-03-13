@@ -16,8 +16,9 @@ from . import config
 from .data import STHypergraphData
 from .dataset.hypergraph import STHypergraphListDataset
 
+from .metadata import ProjectMetadata
+
 from .pipeline import HypergraphEmbedderDriver, HypergraphEmbedderArgs, HGCTSVGClustering, SCEmbeddingSpatialClassifierDriver, Explainer, ExplainerArgs
-from .pipeline.utils import get_celltype_mapping
 
 app = App(name="hgctsvg")
 
@@ -46,7 +47,8 @@ class EmbedderCLIArgs:
 class ClassifierCLIArgs:
     embedding_dim: Annotated[int, Parameter(help="The size of the embedding.")]
     num_layers: Annotated[int, Parameter(help="The number of layers of the classifier")] = 3
-    
+    dropout: Annotated[Optional[float], Parameter(help="Dropout parameter.")] = 0.2
+
 @dataclass
 class TrainerArgs:
     num_epochs: int = 100
@@ -81,13 +83,13 @@ def train_embedder(project: ProjectArgs,
          model: EmbedderCLIArgs,
          trainer: TrainerArgs):
 
-    hypergraph = STHypergraphData.load(project.project_dir)
+    ProjectMetadata(project.project_dir)
+    hypergraph = STHypergraphData.load()
 
     print("hyperedges: ", hypergraph["hyperedge_feats"].shape[0])
     print(vars(model))
     
-    embedder = HypergraphEmbedderDriver(project.project_dir, 
-                                    HypergraphEmbedderArgs(**vars(model)))
+    embedder = HypergraphEmbedderDriver()
     
     embedder.fit(hypergraph,
                  HypergraphEmbedderArgs(**vars(model)),
@@ -101,8 +103,10 @@ def make_embedding(project: ProjectArgs,
                    model: EmbedderCLIArgs,
                    trainer: TrainerArgs):
 
-    hypergraph = STHypergraphData.load(project.project_dir)
-    embedder = HypergraphEmbedderDriver(project.project_dir)
+    ProjectMetadata(project.project_dir)
+    
+    hypergraph = STHypergraphData.load()
+    embedder = HypergraphEmbedderDriver()
 
     embedder.generate_embedding(hypergraph,
                                 HypergraphEmbedderArgs(**vars(model)),
@@ -128,21 +132,14 @@ def compute_spatial_domains(project: ProjectArgs,
             sort_key=5)
 def compute_celltype_spatial_domains(project: ProjectArgs,
                              data: ClusterDataArgs,
-                             clustering_args: ClusterArgs = ClusterArgs()):
+                             clustering: ClusterArgs = ClusterArgs()):
 
-    adata_decomp = sc.read_h5ad(project.project_dir / "ST_decomposition.h5ad")
-    embedding = torch.load(project.project_dir / "node_embeddings.pth")
-    type_list, _ = get_celltype_mapping(project.project_dir, 
-                                        data.cell_type_key)
- 
-    adata_decomp.obsm[data.embedding_key] = embedding.numpy()
+    ProjectMetadata(project.project_dir)
     
-    clustering = HGCTSVGClustering(project.project_dir)
-    clustering.compute_celltype_specific_spatial_clusters(adata_decomp, 
-                                                  type_list,
-                                                  data.cell_type_key,
-                                                  data.embedding_key,
-                                                  clustering_args.resolution)
+    clustering_driver = HGCTSVGClustering()
+    clustering_driver.load_embedding_to_ct_spatial_data(data.embedding_key)
+    clustering_driver.compute_celltype_specific_spatial_clusters(embedding_key=data.embedding_key,
+                                                          resolution=clustering.resolution)
 
 @app.command(help="Fit a classifier that maps embedding features into cell type-specific spatial domains", 
              sort_key=6)
@@ -150,9 +147,12 @@ def train_celltype_domain_classifiers(project: ProjectArgs,
                      classifier: ClassifierCLIArgs,
                      trainer: TrainerArgs):
 
-    driver = SCEmbeddingSpatialClassifierDriver(project.project_dir)
+    ProjectMetadata(project.project_dir)
+    
+    driver = SCEmbeddingSpatialClassifierDriver()
     driver.train_sc_embedding_classifiers(classifier.embedding_dim,
                                           classifier.num_layers,
+                                          classifier.dropout,
                                           trainer.num_epochs,
                                           trainer.batch_size,
                                           trainer.accelerator)
@@ -201,15 +201,17 @@ def compute_gene_to_celltype_domain_attribution(project: ProjectArgs,
                                               model: EmbedderCLIArgs,
                                               classifier: ClassifierCLIArgs,
                                               explainer: ExplainerCLIArgs):
+    ProjectMetadata(project.project_dir)
     
-    hypergraph = STHypergraphData.load(project.project_dir)
+    hypergraph = STHypergraphData.load()
 
     assert model.embedding_dim == classifier.embedding_dim
     
-    driver = Explainer(project.project_dir)
+    driver = Explainer()
     driver.compute_g2ctd_attribution(cell_type,
                                      hypergraph,
                                      HypergraphEmbedderArgs(**vars(model)),
+                                     classifier.dropout,
                                      classifier.num_layers,
                                      ExplainerArgs(**vars(explainer)))
 

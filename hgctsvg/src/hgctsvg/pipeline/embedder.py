@@ -19,11 +19,15 @@ from .utils import get_device
 from ..data import STHypergraphData
 from ..dataset.hypergraph import STHypergraphMatrixDataset, STHypergraphBatchMatrixData
 
-from ..utils import build_incidence_matrix
+from ..metadata import ProjectMetadata
 
 from ..model.hypergraph import HypergraphEmbedder, HypergraphEmbedderArgs
-from ..model.cl.hyfi import HyFi, HyFiLoss 
-from ..model.cl.hgctsvgloss import IntraClassContrastiveLoss, HGCTSVGLoss
+from ..model.cl.hyfi import HyFi, HyFiAE
+from ..model.cl.hgctsvgloss import HGCTCAELoss
+
+from ..utils import build_incidence_matrix
+
+
 # from ..model.cl.tricl import TriCL, TriCLLoss
 
 from ..config import AcceleratorOptions
@@ -32,11 +36,9 @@ logger = logging.getLogger(__name__)
 
 # save node embeddings and hyperedge embeddings
 class HypergraphEmbedderDriver(object):
-    def __init__(self, 
-                 project: Path,
+    def __init__(self,
                  sigma=1):
         
-        self.project = project
         logger.info("Initializing model...")
     
     def __setup_model(self, 
@@ -45,8 +47,8 @@ class HypergraphEmbedderDriver(object):
         
         self.device = get_device(accelerator)
 
-        self.model = HypergraphEmbedder.build(self.project, args)
-        self.cl_model = HyFi(self.model, args.embedding_dim) 
+        self.model = HypergraphEmbedder.build(args)
+        self.cl_model = HyFiAE(self.model, args.embedding_dim) 
         self.cl_model.to(self.device)
         
     def fit(self, 
@@ -56,9 +58,18 @@ class HypergraphEmbedderDriver(object):
             batch_size: int,
             accelerator: AcceleratorOptions):
 
+        project_metadata = ProjectMetadata()
+        
         self.__setup_model(embedder_args,
                            accelerator)
-        self.criterion = HGCTSVGLoss(embedder_args.embedding_dim)
+        self.criterion = HGCTCAELoss(embedder_args.embedding_dim,
+                                     n_classes = 12,
+                                     temp_intraclass = 1.5,
+                                     temp_interclass = 0.5,
+                                     alpha=0.0,
+                                     beta=0.0,
+                                     gamma=0.0,
+                                     rho=1.0)
         self.__configure_optimizer()
         self.criterion.to(self.device)
         
@@ -122,7 +133,7 @@ class HypergraphEmbedderDriver(object):
                         'optimizer_state_dict': self.optimizer.state_dict(),
                         'loss': min_epoch_loss
                     }
-                    torch.save(checkpoint, self.project / f'{self.model.checkpoint_name()}.pth')
+                    torch.save(checkpoint, project_metadata.project_folder / f'{self.model.checkpoint_name()}.pth')
 
                 e_pbar.set_postfix({
                     'epoch_loss': epoch_loss, 
@@ -140,14 +151,17 @@ class HypergraphEmbedderDriver(object):
         if self.cl_model.training:
             (node_embeddings, 
              hyperedge_embeddings, 
-             augmented_node_embeddings, 
-             augmented_hyperedge_embeddings) = self.cl_model(batch)
+             # augmented_node_embeddings, 
+             # augmented_hyperedge_embeddings,
+             reconstruction) = self.cl_model(batch)
 
-            contrastive_loss = self.criterion(node_embeddings[:batch.neighborhood_n_cells], 
-                                              hyperedge_embeddings[:batch.neighborhood_n_hyperedges], 
-                                              augmented_node_embeddings[:,:batch.neighborhood_n_cells],
-                                              augmented_hyperedge_embeddings[:,:batch.neighborhood_n_hyperedges], 
-                                              batch.neighborhood_incidence_matrix,
+            contrastive_loss = self.criterion(batch.batch_cell_feats[:batch.neighborhood_n_cells],
+                                              reconstruction[:batch.neighborhood_n_cells],
+                                              # node_embeddings[:batch.neighborhood_n_cells], 
+                                              # hyperedge_embeddings[:batch.neighborhood_n_hyperedges], 
+                                              # augmented_node_embeddings[:,:batch.neighborhood_n_cells],
+                                              # augmented_hyperedge_embeddings[:,:batch.neighborhood_n_hyperedges], 
+                                              # batch.neighborhood_incidence_matrix,
                                               batch.batch_cell_types[:batch.neighborhood_n_cells],
                                               batch.sample_n_cells,
                                               batch.sample_n_hyperedges)
@@ -155,7 +169,7 @@ class HypergraphEmbedderDriver(object):
             return contrastive_loss
         
         else:
-            node_embeddings, hyperedge_embeddings = self.model(batch)
+            node_embeddings, hyperedge_embeddings, _ = self.model(batch)
             
             return node_embeddings, hyperedge_embeddings
         
@@ -164,9 +178,11 @@ class HypergraphEmbedderDriver(object):
                            embedder_args: HypergraphEmbedderArgs,
                            batch_size: int,
                            accelerator: AcceleratorOptions):
+
+        project_metadata = ProjectMetadata()
         
         self.__setup_model(embedder_args, accelerator)
-        self.model.load_checkpoint(self.project)
+        self.model.load_checkpoint()
         self.cl_model.eval()
         
         hgdataset = STHypergraphMatrixDataset(hypergraph)
@@ -211,8 +227,8 @@ class HypergraphEmbedderDriver(object):
                                                                                  hyperedge_ids)
 
         print(node_embeddings.shape, hyperedge_embeddings.shape)
-        torch.save(node_embeddings, self.project / "node_embeddings.pth")
-        torch.save(hyperedge_embeddings, self.project / "hyperedge_embeddings.pth")
+        torch.save(node_embeddings, project_metadata.project_folder / "node_embeddings.pth")
+        torch.save(hyperedge_embeddings, project_metadata.project_folder / "hyperedge_embeddings.pth")
 
     def __reduce_hyperedge_embeddings(self, hyperedge_embeddings, hyperedge_ids):
         hyperedge_ids = hyperedge_ids.squeeze().long()
