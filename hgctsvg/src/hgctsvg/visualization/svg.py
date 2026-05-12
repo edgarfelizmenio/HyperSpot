@@ -16,9 +16,12 @@ def plot_region(adata, region_id, ax, region_key="leiden"):
         title=f"EC region: {region_id}",
     )
 
-def plot_top_domain_de_genes(project: Path, adata, top_genes, regions = list[str], 
+def plot_domain_svgs(adata, top_genes, regions = list[str], 
                              figsize=(4, 4), n_cols = 4, use_raw=False,
                              save=True, transparent=True, file_ext='png'):
+
+    project_metadata = ProjectMetadata()
+    
     n_rows = ((len(regions) // n_cols) + (1 if (len(regions) % n_cols) > 0 else 0)) * 2
     width, height = figsize
     fig, axes = plt.subplots(nrows=n_rows, ncols=n_cols, figsize=(width * n_cols, height * n_rows))
@@ -31,15 +34,16 @@ def plot_top_domain_de_genes(project: Path, adata, top_genes, regions = list[str
         if i < len(regions):
             region = regions[i]
             adata_region = adata[adata.obs['leiden'] == str(region)]
+            adata_plot = adata.copy()
 
             gene_id = top_genes[top_genes['region'] == region]['scores'].idxmax()
             gene_name = adata.var.loc[gene_id]['SYMBOL']
             score = top_genes.loc[gene_id]['scores']
             
             if use_raw:
-                vals = adata.raw[:,gene_id].X
+                vals = adata_plot.raw[:,gene_id].X
             else:
-                vals = adata[:,gene_id].X
+                vals = adata_plot[:,gene_id].X
             # remove zeros
             nz = vals[vals > 0]
             vmin = np.percentile(nz, 5)
@@ -53,7 +57,7 @@ def plot_top_domain_de_genes(project: Path, adata, top_genes, regions = list[str
                 legend_loc=None
             )
             sq.pl.spatial_scatter(
-                adata,
+                adata_plot,
                 color = gene_id,
                 ax = ax_expr,
                 title=f"{gene_name}: {score:0.4}",
@@ -70,12 +74,9 @@ def plot_top_domain_de_genes(project: Path, adata, top_genes, regions = list[str
     plt.tight_layout()
     
     if save:
-        save_dir = project / 'plots'
-        save_dir.mkdir(exist_ok=True)
-        plt.savefig(project / 'plots' / f'top_de_genes.{file_ext}', transparent=True)
+        plt.savefig(project_metadata.plot_dir / f'top_de_genes.{file_ext}', transparent=True)
     
     plt.show()
-
 
             
 def plot_domain_de_genes(adata,
@@ -221,7 +222,6 @@ def plot_domain_ct_svgs(adata,
                 vmax=vmax,
                 size=1,
                 colorbar=False)
-
         else:
             fig.delaxes(ax)
 
@@ -229,7 +229,6 @@ def plot_domain_ct_svgs(adata,
     plt.show()
     
     del adata_region, adata_plot    
-
 
 def plot_ct_decomposition(adata, ct_key='cell_type', n_cols = 4, figsize: tuple = (20, 15)):
 

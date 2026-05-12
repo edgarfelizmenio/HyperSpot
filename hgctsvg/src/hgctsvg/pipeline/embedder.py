@@ -223,27 +223,30 @@ class HypergraphEmbedderDriver(object):
         node_embeddings = node_embeddings[node_order]
         
         hyperedge_ids = torch.cat(hyperedge_id_batches, dim=0)
-        hyperedge_ids, hyperedge_embeddings = self.__reduce_hyperedge_embeddings(hyperedge_embeddings,
-                                                                                 hyperedge_ids)
+        hyperedge_embeddings = self.__reduce_hyperedge_embeddings(hyperedge_embeddings,
+                                                                  hyperedge_ids,
+                                                                  hypergraph["num_spots"])
 
         print(node_embeddings.shape, hyperedge_embeddings.shape)
         torch.save(node_embeddings, project_metadata.project_folder / "node_embeddings.pth")
         torch.save(hyperedge_embeddings, project_metadata.project_folder / "hyperedge_embeddings.pth")
 
-    def __reduce_hyperedge_embeddings(self, hyperedge_embeddings, hyperedge_ids):
+    def __reduce_hyperedge_embeddings(self, hyperedge_embeddings, hyperedge_ids, n_hyperedges):
         hyperedge_ids = hyperedge_ids.squeeze().long()
         unique_ids, emb_to_id = torch.unique(hyperedge_ids, sorted=True, return_inverse=True)
-        out = torch.zeros(unique_ids.numel(), hyperedge_embeddings.size(1), device=hyperedge_embeddings.device)
-        count = torch.zeros(unique_ids.numel(), device=hyperedge_embeddings.device)
-    
+        out = torch.full((n_hyperedges, hyperedge_embeddings.size(1)), float('nan'), device=hyperedge_embeddings.device)
+        count = torch.zeros(n_hyperedges, device=hyperedge_embeddings.device)
+        
         out.scatter_reduce_(0, 
                             emb_to_id[:, None].expand_as(hyperedge_embeddings), 
                             hyperedge_embeddings, "sum", include_self=False)
         count.scatter_reduce_(0, 
                               emb_to_id, torch.ones_like(emb_to_id, dtype=count.dtype), 
                               "sum", include_self=False)
-    
-        return unique_ids, out / count[:, None]        
+
+        out[unique_ids] = out[unique_ids] / count[unique_ids].unsqueeze(1)
+
+        return out
     
     @classmethod
     def get_available_embedders(cls):

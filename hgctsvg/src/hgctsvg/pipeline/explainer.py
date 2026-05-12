@@ -12,7 +12,7 @@ from pathlib import Path
 from tqdm import tqdm
 from typing import List
 
-from captum.attr import IntegratedGradients, DeepLift
+from captum.attr import IntegratedGradients
 
 from torch.utils.data import DataLoader, TensorDataset
 from torch.utils.data.sampler import BatchSampler, SequentialSampler
@@ -202,33 +202,35 @@ class Explainer(object):
         self.classifier.eval()
 
         forward_fn = self.embedder.get_e2e_attribution_forward(self.classifier, num_repeats=1)
-        ig = IntegratedGradients(forward_fn, multiply_by_inputs=False)
+        ig = IntegratedGradients(forward_fn, multiply_by_inputs=True)
 
         print(ids.shape, classes.shape)
         
         dataset = TensorDataset(ids, classes)
         loader = DataLoader(dataset, batch_size=explainer_args.batch_size, shuffle=False, drop_last=False)
-            
-        attribution_batches = []
-        with tqdm(loader, leave=False, position=0) as batch_pbar:
-            for batch_ids, batch_classes in batch_pbar:
-                hg_batch = hgdataset[batch_ids.tolist()]
-                
-                hg_batch = hg_batch.to_device(self.device)
-                inputs, additional_forward_args = self.embedder.get_e2e_attribution_inputs(hg_batch)        
-                # inputs = inputs.to(self.device)
-                # incidence_matrix = additional_forward_args[0].to(self.device)
-                # batch_size = additional_forward_args[1]
-                batch_classes = batch_classes.to(self.device)
 
-                attribution_batch = ig.attribute(inputs, 
-                                            target=batch_classes, 
-                                            n_steps=explainer_args.n_steps,
-                                            internal_batch_size=inputs.shape[0],
-                                            additional_forward_args = additional_forward_args)
-                
-                attribution_batch = attribution_batch[:hg_batch.sample_n_cells]
-                attribution_batches.append(attribution_batch)
+        attribution_batches = []
+        with torch.no_grad():
+            with tqdm(loader, leave=False, position=0) as batch_pbar:
+                for batch_ids, batch_classes in batch_pbar:
+                    hg_batch = hgdataset[batch_ids.tolist()]
+                    
+                    hg_batch = hg_batch.to_device(self.device)
+                    inputs, additional_forward_args = self.embedder.get_e2e_attribution_inputs(hg_batch)        
+                    # inputs = inputs.to(self.device)
+                    # incidence_matrix = additional_forward_args[0].to(self.device)
+                    # batch_size = additional_forward_args[1]
+                    batch_classes = batch_classes.to(self.device)
+    
+                    attribution_batch = ig.attribute(inputs, 
+                                                target=batch_classes, 
+                                                n_steps=explainer_args.n_steps,
+                                                internal_batch_size=inputs.shape[0],
+                                                # abs=False,
+                                                additional_forward_args = additional_forward_args)
+                    
+                    attribution_batch = attribution_batch[:hg_batch.sample_n_cells]
+                    attribution_batches.append(attribution_batch)
         
         attributions = torch.cat(attribution_batches, dim=0)
 
@@ -252,7 +254,7 @@ class Explainer(object):
         ct_results_dir = project_metadata.attr_dir / f"cell_type_{cell_type}"
         return np.load(ct_results_dir / f"attributions.npy")
 
-    def find_domain_gene_idx(self, cell_type, pct=95):
+    def find_domain_gene_idx(self, cell_type, alpha=1.5):
         project_metadata = ProjectMetadata()
         
         attributions = self.load_ct_results(cell_type)
@@ -261,7 +263,7 @@ class Explainer(object):
         num_regions = adata_celltype.obs['leiden'].nunique()
         regions = adata_celltype.obs['leiden'].to_numpy().astype(int)
         
-        return find_relevant_features(attributions, regions, num_regions, pct)
+        return find_relevant_features(attributions, regions, num_regions, alpha)
         # return find_relevant_features2(attributions, adata_celltype.X, regions, num_regions, pct)
 
 def find_relevant_features2(attributions, expression, indexes, num_indexes, pct=95):
@@ -293,7 +295,7 @@ def find_relevant_features2(attributions, expression, indexes, num_indexes, pct=
     
     return attr_grp_impt_feat_idx, grp_weighted_mean
 
-def find_relevant_features(attributions, indexes, num_indexes, pct=95):
+def find_relevant_features(attributions, indexes, num_indexes, alpha=1.5):
     """
     Find metagenes associated with cell spatial domains.
     """
@@ -303,24 +305,18 @@ def find_relevant_features(attributions, indexes, num_indexes, pct=95):
     neg_attr_grps = [np.where(attr_grps[i] < 0, attr_grps[i], 0) for i in range(num_indexes)]
     
     # set negative attributions as zero
-    pos_feat_idx, pos_attr_norms = find_impt_feature_idx(pos_attr_grps, num_indexes, pct)
-    neg_feat_idx, neg_attr_norms = find_impt_feature_idx(neg_attr_grps, num_indexes, pct)
+    pos_feat_idx, pos_attr_norms = find_impt_feature_idx(pos_attr_grps, num_indexes, alpha)
+    neg_feat_idx, neg_attr_norms = find_impt_feature_idx(neg_attr_grps, num_indexes, alpha)
 
     return pos_feat_idx, neg_feat_idx, pos_attr_norms, neg_attr_norms
 
-def find_impt_feature_idx(attr_grps, num_groups, pct=95):
+def find_impt_feature_idx(attr_grps, num_groups, alpha=1.5):
     # compute norm for each group to summarize overall attribution of feature accross all samples in the classification
     attr_grp_norms = [np.linalg.norm(attr_grps[i], axis=0) for i in range(num_groups)]    
-    threshold = [np.percentile(attr_grp_norms[i], pct) for i in range(num_groups)]
 
     # apply log transformation
     attr_grp_norms = [np.log(attr_grp_norms[i] + 1) for i in range(num_groups)]
-
-    # attr_grp_mean = [np.mean(attr_grp_norms[i]) for i in range(num_groups)]
-    # attr_grp_std = [np.std(attr_grp_norms[i]) for i in range(num_groups)]
-
-    # Features with attribution norm higher than mean + alpha*std will be considered important
-    # attr_grp_impt = [attr_grp_norms[i] > attr_grp_mean[i] + (alpha * attr_grp_std[i]) for i in range(num_groups)]
+    # threshold = [np.percentile(attr_grp_norms[i], pct) for i in range(num_groups)]
 
     # TODO categorize
     # high pos low neg -> positive attribution
@@ -329,7 +325,13 @@ def find_impt_feature_idx(attr_grps, num_groups, pct=95):
     # log neg low pos -> irrelevant
 
     # eliminate genes with low variance across groups
-    attr_grp_impt = [attr_grp_norms[i] > threshold[i] for i in range(num_groups)]
+    # attr_grp_impt = [attr_grp_norms[i] > threshold[i] for i in range(num_groups)]
+
+    attr_grp_mean = [np.mean(attr_grp_norms[i]) for i in range(num_groups)]
+    attr_grp_std = [np.std(attr_grp_norms[i]) for i in range(num_groups)]
+
+    # Features with attribution norm higher than mean + alpha*std will be considered important
+    attr_grp_impt = [attr_grp_norms[i] > attr_grp_mean[i] + (alpha * attr_grp_std[i]) for i in range(num_groups)]    
     attr_grp_impt_feat_idx = [attr_grp_impt[i].nonzero()[0] for i in range(num_groups)]
 
     # order by decreasing norm of attributions

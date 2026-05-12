@@ -5,7 +5,10 @@ import scanpy as sc
 from pathlib import Path
 
 from ..metadata import ProjectMetadata
-from ..utils import load_ct_spatial_data
+from ..utils import (
+    load_ct_spatial_data,
+    load_aggr_st_data
+)
 
 def save_ct_svgs(cell_type, feat_idx):
     project_metadata = ProjectMetadata()
@@ -35,35 +38,68 @@ def get_ct_svg_ids(cell_type, feat_idx: dict[int, list]):
 
     return ct_svgs
 
-def compute_spatial_de_genes(project: Path,
-                             cell_type: str,
+def compute_domain_svgs(
+    key: str = 'leiden',
+    min_pts: float = 0.8,
+    min_logfc: float = 1.5,
+    rank_by: str = 'scores',
+):
+    project_metadata = ProjectMetadata()
+    
+    # load adata for cell type    
+    adata_aggr = load_aggr_st_data()
+    
+    return compute_spatial_de_genes(
+        adata_aggr,
+        key,
+        min_pts,
+        min_logfc,
+        rank_by,
+    )    
+    
+def compute_domain_ct_svgs(
+    cell_type: str,
+    key: str = 'leiden',
+    min_pts: float = 0.8,
+    min_logfc: float = 1.5,
+    rank_by: str = 'scores',
+):
+    project_metadata = ProjectMetadata()
+    
+    # load adata for cell type    
+    adata_ct = load_ct_spatial_data(cell_type)
+    
+    return compute_spatial_de_genes(
+        adata_ct,
+        key,
+        min_pts,
+        min_logfc,
+        rank_by,
+    )
+
+def compute_spatial_de_genes(adata,
                              key: str = 'leiden',
-                             percentile: int = 0,
                              min_pts: float = 0.8,
-                             min_precision: float = 0.1,
-                             rank_by: str = 'pvals_adj',
-                             use_raw = False
+                             min_logfc: float = 1.5,
+                             rank_by: str = 'scores',
                             ):
 
     project_metadata = ProjectMetadata()
     
-    # load adata for cell type
-    adata_ct = load_ct_spatial_data(cell_type)
-    
-    sc.tl.rank_genes_groups(adata_ct, 
+    sc.tl.rank_genes_groups(adata, 
                             groupby=key,
                             method="wilcoxon",
                             pts=True,
-                            use_raw=use_raw)
+                            use_raw=False)
     
-    rg = adata_ct.uns['rank_genes_groups']
+    rg = adata.uns['rank_genes_groups']
     groups = list(rg['names'].dtype.names)
 
     results = {}
 
     for group in groups:
         df = sc.get.rank_genes_groups_df(
-            adata_ct, group=group,
+            adata, group=group,
         )
 
         # group_idx = groups.index(group)
@@ -89,11 +125,11 @@ def compute_spatial_de_genes(project: Path,
         df = df[
             (df['pvals_adj'] < 0.05) &
             # only select genes expressed in at least 80% of the region
-            (df['pts'] > 0.8) &
+            (df['pts'] > min_pts) &
             # select genes expressed more in the region than outside
             ((df['pts'] / df['pts_rest']) > 1) &
             # only select genes that are upregulated
-            (df['logfoldchanges'] > 1.5)
+            (df['logfoldchanges'] > min_logfc)
         ]
 
         # df["consistency_rank"] = df["scores"].rank(pct=True)
@@ -110,9 +146,10 @@ def compute_spatial_de_genes(project: Path,
         #     df["precision_rank"]
         # ) / 2
 
-        threshold = df[rank_by].abs().quantile(percentile)
-        top_df = df[df[rank_by].abs() >= threshold]
-        results[group] = top_df.sort_values(rank_by)
+        if rank_by == 'scores':
+            results[group] = df.sort_values(rank_by, ascending=False)
+        else:
+            results[group] = df.sort_values(rank_by)
     
         # df = df.sort_values("combined_score", ascending=False)
 
@@ -121,20 +158,24 @@ def compute_spatial_de_genes(project: Path,
         
     return results
 
-def merge_spatial_de_genes(spatial_de_genes_group, 
-                           rank_by: str = 'scores'):
+def create_svg_list(
+    domain_svgs, 
+    rank_by: str = 'scores'
+):
+    
     all_genes = {}
-    for group in spatial_de_genes_group.keys():
-        genes_group = spatial_de_genes_group[group]
+    for group in domain_svgs.keys():
+        genes_group = domain_svgs[group]
         for i in range(len(genes_group)):
             name = genes_group.iloc[i]['names']
             score = genes_group.iloc[i][rank_by]
+            pvals_adj = genes_group.iloc[i]['pvals_adj']
             if name not in all_genes:
-                all_genes[name] = (score, group)
+                all_genes[name] = (score, pvals_adj, group)
             else:
-                current_score, _ = all_genes[name]
+                current_score, _, _ = all_genes[name]
                 if score > current_score:
-                    all_genes[name] = (score, group)
+                    all_genes[name] = (score, pvals_adj, group)
 
     # sort by
     # num regions (prioritize less regions)
@@ -143,7 +184,7 @@ def merge_spatial_de_genes(spatial_de_genes_group,
     all_genes_df = pd.DataFrame.from_dict(
         all_genes,
         orient="index",
-        columns = ['scores', 'region']
+        columns = ['scores', 'adjusted p-vals', 'region']
     ).sort_values(['region', 'scores'], ascending=[True, False])
     
     return all_genes_df

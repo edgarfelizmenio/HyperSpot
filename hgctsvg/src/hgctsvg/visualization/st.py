@@ -3,7 +3,7 @@ import squidpy as sq
 import matplotlib.pyplot as plt
 
 from ..metadata import ProjectMetadata
-from ..utils import load_orig_st_data
+from ..utils import load_orig_st_data, load_aggr_st_data
 
 def plot_st_gene_counts(figsize: tuple = (4, 4),
                         show_title: bool = True,
@@ -36,6 +36,44 @@ def plot_st_gene_counts(figsize: tuple = (4, 4),
     if save:
         plt.savefig(project_metadata.plot_dir / f'{'ST Data'}.{file_ext}', 
                     transparent = transparent)
+
+    if not display:
+        plt.close(ax.figure)
+
+def plot_aggr_st_domains(figsize: tuple = (4, 4),
+                         show_title=True,
+                         display = False,
+                         save=True,
+                         transparent=True,
+                         file_ext = 'png'):
+
+    project_metadata = ProjectMetadata()
+
+    adata_aggr = load_aggr_st_data()
+
+    fig, ax = plt.subplots(nrows=1, ncols=1, figsize=figsize)
+    sq.pl.spatial_scatter(
+        adata_aggr,
+        color="leiden", # or a gene name
+        title='Spatial Domains',
+        legend_loc="on data",
+        figsize = figsize,
+        ax=ax
+    )
+
+    ax.set(xlabel=None)
+    ax.set(ylabel=None)
+    
+    if not show_title:
+        ax.set_title(None)
+    
+    plt.tight_layout()
+
+    if save:
+        plt.savefig(
+            project_metadata.plot_dir / f'spatial_domains_aggr.{file_ext}',
+            transparent=transparent
+        )
 
     if not display:
         plt.close(ax.figure)

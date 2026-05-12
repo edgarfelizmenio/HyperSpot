@@ -19,6 +19,9 @@ class CTHyFiHGNNv1(nn.Module):
         self.dropout = nn.Dropout(dropout)
         self.node_act = node_act()
         self.hyperedge_act = hyperedge_act()
+
+        # self.hyperedge_emb_norm = nn.BatchNorm1d(embedding_dim)
+        # self.node_emb_norm = nn.BatchNorm1d(embedding_dim)
         
         self.reset_parameters()
 
@@ -36,15 +39,18 @@ class CTHyFiHGNNv1(nn.Module):
         de_inv = (de**-1).diag()
         de_inv[de_inv == float('inf')] = 0
 
-        # node_feats = self.dropout(node_feats)
+        node_feats = self.dropout(node_feats)
 
         hyperedge_embeddings = de_inv @ incidence_matrix.t() @ dv_invsqrt @ self.hyperedge_emb_weight(node_feats, cell_types) + self.hyperedge_emb_bias
-        hyperedge_embeddings = self.hyperedge_act(hyperedge_embeddings)
-        hyperedge_embeddings = self.dropout(hyperedge_embeddings)
+        # hyperedge_embeddings_norm = self.hyperedge_emb_norm(hyperedge_embeddings)
+        hyperedge_embeddings_act = self.hyperedge_act(hyperedge_embeddings)
+        # hyperedge_embeddings_act = self.dropout(hyperedge_embeddings_act)
         
         # TODO: check if node activation necessary
-        node_embeddings = dv_invsqrt @ incidence_matrix @ self.node_emb_weight(hyperedge_embeddings) + self.node_emb_bias(cell_types)
-        node_embeddings = self.node_act(node_embeddings)        
+        node_embeddings = dv_invsqrt @ incidence_matrix @ self.node_emb_weight(hyperedge_embeddings_act) + self.node_emb_bias(cell_types)
+
+        # node_embeddings = self.node_emb_norm(node_embeddings)
+        # node_embeddings = self.node_act(node_embeddings)        
 
         return node_embeddings, hyperedge_embeddings
 

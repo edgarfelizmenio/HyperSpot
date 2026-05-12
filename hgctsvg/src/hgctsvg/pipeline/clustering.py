@@ -1,3 +1,4 @@
+import anndata as ad
 import os
 import numpy as np
 import pandas as pd
@@ -7,32 +8,75 @@ import torch
 from pathlib import Path
 
 from ..metadata import ProjectMetadata
-from ..utils import load_ct_spatial_data, save_ct_spatial_data
+from ..utils import (
+    load_orig_st_data,
+    load_decomposed_st_data,
+    load_ct_spatial_data, 
+    save_ct_spatial_data,
+    load_aggr_st_data,
+    save_aggr_st_data
+)
 
+# normalize embeddings first?
 class HGCTSVGClustering(object):
     def __init__(self):
         pass
         
-    def compute_spatial_clusters(self,
-                            adata_st,
-                            embedding_key="embedding",
-                            resolution=1):
-        
-        # sc.pp.neighbors(adata_st, use_rep='embedding', metric='euclidean', knn=False, method='gauss')
-        sc.pp.neighbors(adata_st, use_rep='embedding', metric='euclidean', knn=True, method='umap')        
-        sc.tl.leiden(adata_st, flavor="igraph", n_iterations=-1, resolution=resolution)
+    def compute_spatial_clusters(
+        self,
+        embedding_key="embedding",
+        min_cluster_pct=-1
+    ):
 
-        cluster_results = adata_st.obs['leiden'].to_numpy(dtype=str)
-        
-        adata_st.write_h5ad(self.output_dir / "ST_init.h5ad")
-        np.save(self.output_dir / "spatial_domains.npy", cluster_results)
+        project_metadata = ProjectMetadata()
 
-        print(adata_st)
+        adata_aggr = load_aggr_st_data()
+        
+        # sc.pp.neighbors(
+        #     adata_aggr, 
+        #     use_rep=embedding_key, 
+        #     metric='euclidean', 
+        #     knn=False, 
+        #     method='gauss'
+        # )
+        
+        sc.pp.neighbors(
+            adata_aggr, 
+            use_rep=embedding_key, 
+            metric='euclidean', 
+            knn=True, 
+            method='umap'
+        )
+        
+        sc.tl.leiden(
+            adata_aggr, 
+            flavor="igraph", 
+            n_iterations=-1, 
+            resolution=1
+        )
+
+        self.__merge_clusters(
+            adata_aggr, 
+            threshold = min_cluster_pct,
+            embedding_key = embedding_key, 
+            label_key='leiden'
+        )
+        
+        cluster_results = adata_aggr.obs['leiden'].to_numpy(dtype=str)
+        
+        save_aggr_st_data(adata_aggr)
+
+        np.save(
+            project_metadata.clustering_dir / "spatial_domains.npy", 
+            cluster_results
+        )
+
+        print(adata_aggr)
     
-    def compute_celltype_specific_spatial_clusters(self, 
-                                                   type_list = [],
-                                                   embedding_key="embedding", 
-                                                   resolution=1):
+    def compute_ct_spatial_clusters(self, 
+                                    type_list = [],
+                                    embedding_key="embedding",
+                                    min_cluster_pct=0.05):
 
         project_metadata = ProjectMetadata()
         
@@ -42,12 +86,16 @@ class HGCTSVGClustering(object):
         cluster_results = {}
         for ct in type_list:
             adata_ct = load_ct_spatial_data(ct)
+
             sc.pp.neighbors(adata_ct, use_rep=embedding_key, metric='euclidean', knn=False, method='gauss')
             # sc.pp.neighbors(adata_ct, use_rep=embedding_key, metric='euclidean', knn=True, method='umap')
             
-            sc.tl.leiden(adata_ct, flavor="igraph", n_iterations=-1, resolution=resolution)
+            sc.tl.leiden(adata_ct, flavor="igraph", n_iterations=-1, resolution=1)
 
-            self.__merge_clusters(adata_ct, embedding_key=embedding_key, label_key='leiden')
+            self.__merge_clusters(adata_ct, 
+                                  threshold = min_cluster_pct,
+                                  embedding_key = embedding_key, 
+                                  label_key='leiden')
             
             save_ct_spatial_data(adata_ct, ct)
             cluster_results[ct] = adata_ct.obs['leiden'].to_numpy(dtype=str) 
@@ -55,6 +103,72 @@ class HGCTSVGClustering(object):
 
         np.savez(project_metadata.clustering_dir / "cell_type_spatial_domains.npz", *cluster_results)
 
+    def create_aggr_st_data(self):
+        adata_decomp = load_decomposed_st_data()
+        adata_st = load_orig_st_data()
+
+        # Aggregate decomposed cells to spot level
+        adata_aggr = sc.get.aggregate(
+            adata_decomp,
+            by="spot_name",
+            func="sum"
+        )
+        
+        # Spots present in both datasets
+        common_spots = adata_st.obs_names.intersection(adata_aggr.obs_names)
+        
+        # Align spot order to ST automatically
+        adata_aggr = adata_aggr[common_spots]
+
+        var = pd.DataFrame(
+            {"SYMBOL": adata_decomp.var['SYMBOL']},
+            index=adata_decomp.var_names
+        )
+        
+        # Build final AnnData
+        adata_final = ad.AnnData(
+            X=adata_aggr.layers["sum"],
+            obs=pd.DataFrame(index=common_spots),
+            var=var,
+        )
+        
+        # Copy spatial coordinates (automatic order alignment)
+        spatial_df = pd.DataFrame(
+            adata_st.obsm["spatial"],
+            index=adata_st.obs_names
+        )
+        
+        adata_final.obsm["spatial"] = spatial_df.loc[common_spots].values
+        
+        # Copy Visium metadata
+        adata_final.uns["spatial"] = adata_st.uns["spatial"].copy()
+        
+        # Preprocessing
+        adata_final.raw = adata_final.copy()
+        sc.pp.log1p(adata_final)
+
+        # Save
+        save_aggr_st_data(adata_final)
+
+    def load_embedding_to_aggr_data(self,
+                                    embedding_key="embedding"):
+
+        project_metadata = ProjectMetadata()
+
+        embedding = torch.load(project_metadata.project_folder / "hyperedge_embeddings.pth")
+
+        nan_mask = torch.isnan(embedding)
+        nan_rows = torch.any(nan_mask, dim=1)
+        embedding = embedding[~nan_rows]
+
+        adata_aggr = load_aggr_st_data()
+
+        assert embedding.shape[0] == adata_aggr.n_obs
+        
+        adata_aggr.obsm[embedding_key] = embedding.numpy()
+
+        save_aggr_st_data(adata_aggr)
+        
     def load_embedding_to_ct_spatial_data(self, embedding_key="embedding"):
         project_metadata = ProjectMetadata()
 
@@ -70,6 +184,9 @@ class HGCTSVGClustering(object):
     def __merge_clusters(self, adata_ct, threshold=0.05,
                          embedding_key="embedding",
                          label_key="leiden"):
+        """
+        Merge clusters so that each the size of each cluster is (threshold)*(num_cells)
+        """
 
         embedding = adata_ct.obsm[embedding_key]
         labels = adata_ct.obs[label_key].astype(str).copy()

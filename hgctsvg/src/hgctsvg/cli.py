@@ -18,7 +18,15 @@ from .dataset.hypergraph import STHypergraphListDataset
 
 from .metadata import ProjectMetadata
 
-from .pipeline import HypergraphEmbedderDriver, HypergraphEmbedderArgs, HGCTSVGClustering, SCEmbeddingSpatialClassifierDriver, Explainer, ExplainerArgs
+from .pipeline import (
+    HypergraphEmbedderDriver, 
+    HypergraphEmbedderArgs, 
+    HGCTSVGClustering, 
+    SCEmbeddingSpatialClassifierDriver, 
+    Explainer, 
+    ExplainerArgs,
+    run_eval,
+)
 
 app = App(name="hgctsvg")
 
@@ -56,14 +64,10 @@ class TrainerArgs:
     accelerator: config.AcceleratorOptions = config.AcceleratorOptions.CUDA    
 
 @dataclass
-class ClusterDataArgs:
-    cell_type_key: str
-    embedding_key: str = "embedding"
-
-@dataclass
 class ClusterArgs:
-    resolution: float = 1.0
-    # TODO: include leiden clustering options
+    # minimum number of samples in a cluster as a percentage of the total number of samples.
+    embedding_key: str = "embedding"
+    min_cluster_pct: float = 0.05
 
 @dataclass
 class ExplainerCLIArgs:
@@ -116,30 +120,25 @@ def make_embedding(project: ProjectArgs,
 @app.command(help="Using hyperedge embeddings, find the spatial domains present in the Spatial Transcriptomics tissue.",
              sort_key=4)
 def compute_spatial_domains(project: ProjectArgs,
-                            embedding_key = "embedding",
-                            clustering_args: ClusterArgs = ClusterArgs()):
-
-    adata_st = sc.read_h5ad(project.project_dir / "ST_init.h5ad")
-    spot_embeddings = torch.load(project.project_dir / "hyperedge_embeddings.pth")
-    adata_st.obsm[embedding_key] = spot_embeddings.numpy()
-
-    clustering = HGCTSVGClustering(project.project_dir)
-    clustering.compute_spatial_clusters(adata_st, 
-                                        embedding_key, 
-                                        clustering_args.resolution)
-
-@app.command(help="Using hypergraph node embeddings, find the spatial domains present for each cell type in the Spatial Transcriptomics tissue.",
-            sort_key=5)
-def compute_celltype_spatial_domains(project: ProjectArgs,
-                             data: ClusterDataArgs,
-                             clustering: ClusterArgs = ClusterArgs()):
+                            clustering: ClusterArgs = ClusterArgs()):
 
     ProjectMetadata(project.project_dir)
     
     clustering_driver = HGCTSVGClustering()
-    clustering_driver.load_embedding_to_ct_spatial_data(data.embedding_key)
-    clustering_driver.compute_celltype_specific_spatial_clusters(embedding_key=data.embedding_key,
-                                                          resolution=clustering.resolution)
+    clustering_driver.create_aggr_st_data()
+    clustering_driver.load_embedding_to_aggr_data(clustering.embedding_key)
+    clustering_driver.compute_spatial_clusters(**vars(clustering))
+
+@app.command(help="Using hypergraph node embeddings, find the spatial domains present for each cell type in the Spatial Transcriptomics tissue.",
+            sort_key=5)
+def compute_celltype_spatial_domains(project: ProjectArgs,
+                                     clustering: ClusterArgs = ClusterArgs()):
+
+    ProjectMetadata(project.project_dir)
+    
+    clustering_driver = HGCTSVGClustering()
+    clustering_driver.load_embedding_to_ct_spatial_data(clustering.embedding_key)
+    clustering_driver.compute_ct_spatial_clusters(**vars(clustering))
 
 @app.command(help="Fit a classifier that maps embedding features into cell type-specific spatial domains", 
              sort_key=6)
@@ -215,8 +214,29 @@ def compute_gene_to_celltype_domain_attribution(project: ProjectArgs,
                                      classifier.num_layers,
                                      ExplainerArgs(**vars(explainer)))
 
+@app.command(help="Run evaluation test.", sort_key=11)
+def perform_model_evaluation(
+    project: ProjectArgs,         
+    model: EmbedderCLIArgs,
+    trainer: TrainerArgs,
+    clustering: ClusterArgs = ClusterArgs(),
+    num_runs: int = 10,
+    ):
+
+    ProjectMetadata(project.project_dir)
+
+    run_eval(
+        HypergraphEmbedderArgs(**vars(model)),
+        trainer.num_epochs,
+        trainer.batch_size,
+        trainer.accelerator,
+        **vars(clustering),
+        n=num_runs,
+    )
+    
+
 @app.command(help="Check if project folder exists.",
-             sort_key=11)
+             sort_key=12)
 def folder_test(project: ProjectArgs):
     if project.project_dir.exists():
         print(f"Folder {project.project_dir} exists!")

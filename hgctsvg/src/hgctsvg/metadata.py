@@ -12,7 +12,8 @@ class ProjectMetadata:
         "classifier_dir": "classifiers",
         "clustering_dir": "clustering",
         "ct_data_dir": "ct_spatial_data",
-        "plot_dir": "plots"
+        "plot_dir": "plots",
+        "eval_dir": "evaluation"
     }
     
     def __init__(self, project_folder=None):

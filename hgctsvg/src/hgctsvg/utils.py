@@ -12,7 +12,14 @@ def load_orig_st_data():
 def load_decomposed_st_data():
     adata_decomp = sc.read_h5ad(ProjectMetadata().project_folder / 'ST_decomposition.h5ad')
     return adata_decomp
-    
+
+def save_aggr_st_data(adata_aggr):
+    adata_aggr.write_h5ad(ProjectMetadata().project_folder / 'ST_aggregated.h5ad')
+
+def load_aggr_st_data():
+    adata_aggr = sc.read_h5ad(ProjectMetadata().project_folder / 'ST_aggregated.h5ad')
+    return adata_aggr
+
 def save_ct_spatial_data(adata_ct, cell_type: str):
     # save adata for cell type
     adata_ct.write_h5ad(ProjectMetadata().ct_data_dir / f'ST_cell_{cell_type}.h5ad')
