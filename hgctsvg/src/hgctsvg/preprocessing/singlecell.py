@@ -23,8 +23,9 @@ def make_ct_spatial_adata(adata_decomp):
         adata_ct = adata_decomp[adata_decomp.obs[cell_type_key] == ct].copy()
 
         # drop genes that have 0 expression
+        print(f"{ct} before filter:", adata_ct.n_vars)
         sc.pp.filter_genes(adata_ct, min_cells=1)
-
+        print(f"{ct} after filter:", adata_ct.n_vars)
         # preprocess cell type-specific data
         adata_ct.raw = adata_ct.copy()
         # Spotiphy output is already in CPM so no need to normalize
@@ -46,7 +47,8 @@ def perform_ct_feature_selection(n_features = 3000):
         adata_ct = load_ct_spatial_data(ct)
 
         feature_genes = compute_feature_genes(adata_ct, n_features)
-
+        # print(f"{ct}:", "dispersions_norm" in adata_ct.var, "feature_gene" in adata_ct.var)
+        
         ct_feats[ct] = feature_genes.tolist()
         save_ct_spatial_data(adata_ct, ct)
 
@@ -55,20 +57,27 @@ def perform_ct_feature_selection(n_features = 3000):
     with open(ct_feature_filename, "wb") as ctff:
         pickle.dump(ct_feats, ctff)
 
-def compute_feature_genes(adata_ct, n_features=3000):
+def compute_feature_genes(adata_ct, n_features=3000, use_spatial=False):
     sc.pp.filter_genes(adata_ct, min_cells=1)
     genes = adata_ct.var_names
 
     sc.pp.highly_variable_genes(adata_ct, flavor="seurat")
     
+    # valid_hvg = (adata_ct.var["highly_variable"] == True)
+    # hvg_genes = adata_ct.var.index[valid_hvg]
+
+    if not use_spatial:
+        # hvg_pct = adata_ct.var.loc[hvg_genes, 'dispersions_norm'].sort_values(ascending=False)
+        hvg_pct = adata_ct.var['dispersions_norm'].sort_values(ascending=False)
+        top_genes = hvg_pct.index[:n_features]
+        adata_ct.var['feature_gene'] = False
+        adata_ct.var.loc[top_genes, 'feature_gene'] = True
+        return top_genes
+    
     sq.gr.spatial_neighbors(adata_ct)
     sq.gr.spatial_autocorr(adata_ct, mode='moran', genes = adata_ct.var_names)
-
     var = adata_ct.var
     corr_df = adata_ct.uns['moranI'].loc[adata_ct.var_names]
-
-    valid_hvg = (var["highly_variable"] == True)
-    hvg_genes = var.index[valid_hvg]
     hvg_pct = var.loc[hvg_genes, 'dispersions_norm'].rank(pct=True)
     
     variance = adata_ct.X.var(axis=0)
@@ -76,22 +85,16 @@ def compute_feature_genes(adata_ct, n_features=3000):
     
     moran_z = (moran_abs - moran_abs.mean()) / moran_abs.std()
     var_z = (variance - variance.mean()) / variance.std()
-
     spatial_score = moran_z * var_z
     spatial_pct = spatial_score.rank(pct=True)
-
     combined_score = np.sqrt(hvg_pct * spatial_pct.loc[hvg_genes])
-
     adata_ct.var['hvg_scores'] = np.nan
     adata_ct.var.loc[hvg_genes, 'hvg_scores'] = hvg_pct
-
     adata_ct.var['spatial_scores'] = spatial_pct
     
     adata_ct.var['combined_scores'] = np.nan
     adata_ct.var.loc[hvg_genes, 'combined_scores'] = combined_score
-
     top_genes = combined_score.sort_values(ascending=False).index[:n_features]
-
     n_spatial_genes = n_features - len(top_genes)
 
     if n_spatial_genes > 0:

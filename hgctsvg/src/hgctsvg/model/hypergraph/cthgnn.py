@@ -7,7 +7,11 @@ from . import HypergraphEmbedder, HypergraphEmbedderArgs
 from ..moduledict import LinearDict, LinearDictLora, ParameterDict
 
 class CTHyFiHGNNv1(nn.Module):
-    def __init__(self, input_dim, embedding_dim, dropout = 0.1, node_act=nn.PReLU, hyperedge_act=nn.PReLU):
+    def __init__(self, 
+                 input_dim, 
+                 embedding_dim, 
+                 dropout = 0.1,
+                 act=nn.PReLU):
         super(CTHyFiHGNNv1, self).__init__()
         # perform node-edge-node feature transform
 
@@ -17,8 +21,7 @@ class CTHyFiHGNNv1(nn.Module):
         self.node_emb_weight = nn.Linear(embedding_dim, embedding_dim, bias=False)
         self.node_emb_bias = ParameterDict(12, embedding_dim)
         self.dropout = nn.Dropout(dropout)
-        self.node_act = node_act()
-        self.hyperedge_act = hyperedge_act()
+        self.act = act()
 
         # self.hyperedge_emb_norm = nn.BatchNorm1d(embedding_dim)
         # self.node_emb_norm = nn.BatchNorm1d(embedding_dim)
@@ -43,14 +46,11 @@ class CTHyFiHGNNv1(nn.Module):
 
         hyperedge_embeddings = de_inv @ incidence_matrix.t() @ dv_invsqrt @ self.hyperedge_emb_weight(node_feats, cell_types) + self.hyperedge_emb_bias
         # hyperedge_embeddings_norm = self.hyperedge_emb_norm(hyperedge_embeddings)
-        hyperedge_embeddings_act = self.hyperedge_act(hyperedge_embeddings)
-        # hyperedge_embeddings_act = self.dropout(hyperedge_embeddings_act)
+        hyperedge_embeddings_act = self.act(hyperedge_embeddings)
+        hyperedge_embeddings_act = self.dropout(hyperedge_embeddings_act)
         
         # TODO: check if node activation necessary
         node_embeddings = dv_invsqrt @ incidence_matrix @ self.node_emb_weight(hyperedge_embeddings_act) + self.node_emb_bias(cell_types)
-
-        # node_embeddings = self.node_emb_norm(node_embeddings)
-        # node_embeddings = self.node_act(node_embeddings)        
 
         return node_embeddings, hyperedge_embeddings
 

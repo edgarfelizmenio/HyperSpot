@@ -54,7 +54,7 @@ def plot_aggr_st_domains(figsize: tuple = (4, 4),
     fig, ax = plt.subplots(nrows=1, ncols=1, figsize=figsize)
     sq.pl.spatial_scatter(
         adata_aggr,
-        color="leiden", # or a gene name
+        color="domain", # or a gene name
         title='Spatial Domains',
         legend_loc="on data",
         figsize = figsize,

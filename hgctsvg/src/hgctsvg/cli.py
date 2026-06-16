@@ -6,7 +6,7 @@ import torch
 
 from cyclopts import App, Parameter
 from dataclasses import dataclass, astuple
-from typing import Optional, Annotated, List
+from typing import Optional, Annotated, List, Literal
 
 from pathlib import Path
 from tqdm.auto import tqdm
@@ -61,13 +61,16 @@ class ClassifierCLIArgs:
 class TrainerArgs:
     num_epochs: int = 100
     batch_size: int = 8192
-    accelerator: config.AcceleratorOptions = config.AcceleratorOptions.CUDA    
+    accelerator: config.AcceleratorOptions = config.AcceleratorOptions.CUDA
+    seed: int = 42
 
 @dataclass
 class ClusterArgs:
     # minimum number of samples in a cluster as a percentage of the total number of samples.
     embedding_key: str = "embedding"
+    algorithm: Literal["leiden", "optics"] = "leiden"
     min_cluster_pct: float = 0.05
+    seed: int = 0
 
 @dataclass
 class ExplainerCLIArgs:
@@ -97,9 +100,10 @@ def train_embedder(project: ProjectArgs,
     
     embedder.fit(hypergraph,
                  HypergraphEmbedderArgs(**vars(model)),
-                 trainer.num_epochs, 
+                 trainer.num_epochs,
                  trainer.batch_size,
-                 trainer.accelerator)
+                 trainer.accelerator,
+                 seed=trainer.seed)
 
 @app.command(help="Use the trained hypergraph model to generate the embeddings.",
              sort_key=3)
@@ -120,12 +124,13 @@ def make_embedding(project: ProjectArgs,
 @app.command(help="Using hyperedge embeddings, find the spatial domains present in the Spatial Transcriptomics tissue.",
              sort_key=4)
 def compute_spatial_domains(project: ProjectArgs,
-                            clustering: ClusterArgs = ClusterArgs()):
+                            clustering: ClusterArgs = ClusterArgs(),
+                            copy_var_cols: Annotated[Optional[List[str]], Parameter(help="var columns to copy from the decomposed AnnData into the aggregated AnnData.")] = None):
 
     ProjectMetadata(project.project_dir)
-    
+
     clustering_driver = HGCTSVGClustering()
-    clustering_driver.create_aggr_st_data()
+    clustering_driver.create_aggr_st_data(var_cols=copy_var_cols)
     clustering_driver.load_embedding_to_aggr_data(clustering.embedding_key)
     clustering_driver.compute_spatial_clusters(**vars(clustering))
 
@@ -233,7 +238,6 @@ def perform_model_evaluation(
         **vars(clustering),
         n=num_runs,
     )
-    
 
 @app.command(help="Check if project folder exists.",
              sort_key=12)

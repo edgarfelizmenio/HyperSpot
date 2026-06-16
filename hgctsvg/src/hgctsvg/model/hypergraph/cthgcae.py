@@ -11,7 +11,7 @@ class CTHGCAE(nn.Module):
     def __init__(self, input_dim, embedding_dim, dropout=0.1):
         super(CTHGCAE, self).__init__()
         self.encoder = CTHyFiHGNNv1(input_dim, embedding_dim, dropout)
-        self.decoder = CTHyFiHGNNv1(embedding_dim, input_dim, dropout=0, node_act=nn.Identity)
+        self.decoder = CTHyFiHGNNv1(embedding_dim, input_dim, dropout=0)
 
     def forward(self, node_feats, cell_types, incidence_matrix):
         node_embeddings, hyperedge_embeddings = self.encoder(node_feats,

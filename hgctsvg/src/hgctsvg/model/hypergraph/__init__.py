@@ -91,3 +91,4 @@ from .hgnn import HyFiEmbedder
 from .transformer import HGTransformerEmbedder
 from .cthgnn import CTHyFiEmbedder
 from .cthgcae import CTHGCAEEmbedder
+from .cthgcaev2 import CTHGCAEv2Embedder

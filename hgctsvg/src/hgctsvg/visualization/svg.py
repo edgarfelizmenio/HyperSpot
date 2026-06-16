@@ -9,7 +9,7 @@ from pathlib import Path
 
 from ..metadata import ProjectMetadata
 
-def plot_region(adata, region_id, ax, region_key="leiden"):
+def plot_region(adata, region_id, ax, region_key="domain"):
     sq.pl.spatial_scatter(
         adata,
         color=region_key,
@@ -33,7 +33,7 @@ def plot_domain_svgs(adata, top_genes, regions = list[str],
         ax_expr = axes[row + 1][col]
         if i < len(regions):
             region = regions[i]
-            adata_region = adata[adata.obs['leiden'] == str(region)]
+            adata_region = adata[adata.obs['domain'] == str(region)]
             adata_plot = adata.copy()
 
             gene_id = top_genes[top_genes['region'] == region]['scores'].idxmax()
@@ -51,7 +51,7 @@ def plot_domain_svgs(adata, top_genes, regions = list[str],
             
             sq.pl.spatial_scatter(
                 adata_region,
-                color='leiden',
+                color='domain',
                 title=f"region {region}",
                 ax=ax_region,
                 legend_loc=None
@@ -84,16 +84,17 @@ def plot_domain_de_genes(adata,
                          de_scores,
                          names,
                          n_cols = 4,
+                         var_names_column = 'SYMBOL',
                          figsize: tuple = (20, 15), limit=4):
     
     assert limit % n_cols == 0
-    adata_region = adata[adata.obs['leiden'] == str(region)]
+    adata_region = adata[adata.obs['domain'] == str(region)]
 
     fig, axes = plt.subplots(1, 2, figsize=(20,10))
     # display region
     sq.pl.spatial_scatter(
         adata_region,
-        color='leiden',
+        color='domain',
         title=f"region: {region}",
         ax=axes[0],
         legend_loc=None)
@@ -102,7 +103,8 @@ def plot_domain_de_genes(adata,
         limit = len(names)
 
     adata_plot = adata.copy()
-    adata_plot.var_names = adata.var['SYMBOL']
+    if var_names_column is not None:
+        adata_plot.var_names = adata.var[var_names_column]
     adata_plot.var_names_make_unique()
     de_gene_idx = adata.var_names.get_indexer(names[:limit])
     genes = adata_plot.var_names[de_gene_idx]
@@ -159,13 +161,13 @@ def plot_domain_ct_svgs(adata,
                         limit=12,
                         use_raw = False):
  
-    adata_region = adata[adata.obs['leiden'] == str(region)]
+    adata_region = adata[adata.obs['domain'] == str(region)]
 
     fig, axes = plt.subplots(1, 2, figsize=(20,10))
     # display region
     sq.pl.spatial_scatter(
         adata_region,
-        color='leiden',
+        color='domain',
         title=f"region: {region}",
         ax=axes[0],
         legend_loc=None)
@@ -261,7 +263,7 @@ def plot_ct_decomposition(adata, ct_key='cell_type', n_cols = 4, figsize: tuple 
 
 def plot_ct_marker_groups_heatmap(adata, 
                            top_markers: dict, 
-                           groupby="leiden",
+                           groupby="domain",
                            n_genes=10,
                            var_scale=True):
 

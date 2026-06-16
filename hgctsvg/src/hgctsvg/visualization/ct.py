@@ -60,7 +60,7 @@ def plot_all_ct_domains(n_cols = 4, figsize: tuple = (20, 15)):
         
             sq.pl.spatial_scatter(
                 adata_celltype,
-                color='leiden',
+                color='domain',
                 ax=ax,
                 title=cell_type,
                 legend_loc=None
@@ -134,7 +134,7 @@ def plot_ct_domains(type_list: list = None,
         
         ax = sq.pl.spatial_scatter(
             adata_ct,
-            color="leiden", # or a gene name
+            color="domain",
             title=ct,
             legend_loc=None,
             figsize = figsize,

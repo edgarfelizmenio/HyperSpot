@@ -5,9 +5,15 @@ from pathlib import Path
 
 from .metadata import ProjectMetadata
 
+def save_orig_st_data(adata_st):
+    adata_st.write_h5ad(ProjectMetadata().project_folder / 'ST_orig.h5ad')
+
 def load_orig_st_data():
-    adata_st = sc.read_h5ad(ProjectMetadata().project_folder / 'ST_init.h5ad')
+    adata_st = sc.read_h5ad(ProjectMetadata().project_folder / 'ST_orig.h5ad')
     return adata_st
+
+def save_decomposed_st_data(adata_decomp):
+    adata_decomp.write_h5ad(ProjectMetadata().project_folder / 'ST_decomposition.h5ad')
 
 def load_decomposed_st_data():
     adata_decomp = sc.read_h5ad(ProjectMetadata().project_folder / 'ST_decomposition.h5ad')

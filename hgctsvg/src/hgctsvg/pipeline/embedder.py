@@ -51,15 +51,25 @@ class HypergraphEmbedderDriver(object):
         self.cl_model = HyFiAE(self.model, args.embedding_dim) 
         self.cl_model.to(self.device)
         
-    def fit(self, 
+    def fit(self,
             hypergraph: STHypergraphData,
             embedder_args: HypergraphEmbedderArgs,
             num_epochs: int,
             batch_size: int,
-            accelerator: AcceleratorOptions):
+            accelerator: AcceleratorOptions,
+            seed: int = 42):
 
         project_metadata = ProjectMetadata()
-        
+
+        # set global seed for reproducibility
+        import random, numpy as np
+        torch.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+        np.random.seed(seed)
+        random.seed(seed)
+
         self.__setup_model(embedder_args,
                            accelerator)
         self.criterion = HGCTCAELoss(embedder_args.embedding_dim,
@@ -142,7 +152,7 @@ class HypergraphEmbedderDriver(object):
 
                     
     def __configure_optimizer(self):
-        self.optimizer = optim.Adam(list(self.cl_model.parameters()) + list(self.criterion.parameters()), lr=0.0001)
+        self.optimizer = optim.Adam(list(self.cl_model.parameters()) + list(self.criterion.parameters()), lr=0.001)
                 
     def __step_batch(self, batch: STHypergraphBatchMatrixData):
 

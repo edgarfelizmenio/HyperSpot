@@ -47,9 +47,9 @@ def create_incidence_matrix(adata_decomp, adata_st, edge_index):
         # display(i, neighbors)
         neighbor_names = adata_st.obs.index[neighbors]
         # display(neighbor_names)
-        cells = adata_decomp[adata_decomp.obs['spot_name'] == spot_name].obs_names.astype(int)
+        cells = adata_decomp[adata_decomp.obs['spot_name'] == spot_name].obs['cell_idx'].values
         # display(cells)
-        neighbor_ids = adata_decomp[adata_decomp.obs['spot_name'].isin(neighbor_names)].obs_names.astype(int)
+        neighbor_ids = adata_decomp[adata_decomp.obs['spot_name'].isin(neighbor_names)].obs['cell_idx'].values
         # display(neighbor_ids, neighbor_ids.shape)
         incidence_mat[neighbor_ids,i] = 1
         # display(incidence_mat[neighbor_ids,i])
