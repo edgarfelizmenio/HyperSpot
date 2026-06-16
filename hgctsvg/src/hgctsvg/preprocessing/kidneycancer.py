@@ -1,10 +1,91 @@
 import scanpy as sc
+import pandas as pd
+import numpy as np
 
 from ..metadata import ProjectMetadata
 
 def extract_sc_patient_data(adata, patient_id):
     adata = adata[adata.obs['patient'] == patient_id].copy()
     return adata
+
+def find_conflicting_genes(adata_sc, adata_st, geneset: pd.DataFrame):
+    st_map = adata_st.var[['SYMBOL']].copy()
+    st_map = st_map[st_map.index.isin(geneset.index)]
+    st_map = st_map[st_map['SYMBOL'].notna()]
+    
+    dupes = st_map[st_map['SYMBOL'].duplicated(keep=False)].copy()
+    
+    if len(dupes) == 0:
+        print("No duplicate symbols found.")
+        # return empty dataframe
+        return pd.DataFrame()
+
+    print(dupes)
+    
+    counts = np.array(adata_st[:, dupes.index].X.sum(axis=0)).flatten()
+    dupes['total_counts'] = counts
+    # percentage of spots that have nonzero expression of the gene
+    dupes['pct_nonzero'] = (
+        np.array((adata_st[:, dupes.index].X > 0).sum(axis=0)).flatten() / adata_st.n_obs
+    )
+    
+    dupes['would_keep'] = False
+    
+    dupes.loc[dupes.groupby('SYMBOL', observed=True)['total_counts'].idxmax(), 'would_keep'] = True
+    
+    dupes['in_sc'] = dupes['SYMBOL'].isin(adata_sc.var_names)
+    
+    n_conflicts = dupes['SYMBOL'].nunique()
+    n_relevant = dupes[dupes['in_sc']]['SYMBOL'].nunique()
+    
+    print(f"Found {n_conflicts} symbols with duplicate Ensembl IDs")
+    print(f"  → {n_relevant} overlap with scRNA-seq and require manual inspection")
+    print(f"  → {n_conflicts - n_relevant} are absent from scRNA-seq and will be handled automatically\n")
+    
+    return dupes.sort_values(['in_sc', 'SYMBOL', 'total_counts'], ascending=[False, True, False])    
+
+def use_ensembl_gene_ids(
+    adata_sc, 
+    adata_st, 
+    geneset: set,                     
+    drop_cols: list[str] = [], 
+    rename_cols: dict[str, str] = {}
+):
+    st_map = adata_st.var[['SYMBOL']].copy()
+    st_map = st_map[st_map.index.isin(geneset.index)]
+    st_map = st_map[st_map['SYMBOL'].notna()]
+    
+    st_map = st_map[~st_map.index.isin(drop_cols)]
+    # st_map['SYMBOL'] = st_map.index.map(rename_cols).fillna(st_map['SYMBOL'].values)
+    mask = st_map.index.isin(rename_cols)
+    new_symbols = st_map.loc[mask].index.map(rename_cols)
+    # symbol is categorical, make new categories first before assignment
+    st_map['SYMBOL'] = st_map['SYMBOL'].cat.add_categories(
+        [s for s in new_symbols if s not in st_map['SYMBOL'].cat.categories]
+    )
+    st_map.loc[mask, 'SYMBOL'] = new_symbols
+    
+    dupes = st_map[st_map['SYMBOL'].duplicated(keep=False)]
+    if len(dupes):
+        raise ValueError(
+            f"Unresolved duplicate symbols remain after applying drop_cols/rename_cols. "
+            f"Run check_symbol_conflicts() and update drop_cols/rename_cols accordingly.\n"
+            f"{dupes.sort_values('SYMBOL')}"
+        )
+    
+    common = st_map[st_map['SYMBOL'].isin(adata_sc.var_names)]
+    
+    new_adata_st = adata_st[:, common.index].copy()
+    new_adata_sc = adata_sc[:, common['SYMBOL'].astype(str).tolist()].copy()
+    new_adata_sc.var.index = common.index
+    new_adata_sc.var_names_make_unique()
+    
+    n_genes = len(common)
+    print(f"Retained {n_genes} genes common to both datasets")
+    print(f"  scRNA-seq: {adata_sc.n_vars} → {n_genes} genes")
+    print(f"  Spatial:   {adata_st.n_vars} → {n_genes} genes")
+    
+    return new_adata_sc, new_adata_st
 
 def st_samples_in_name(sample_ids, name):
     return any(sample_id in name for sample_id in sample_ids)
@@ -29,69 +110,3 @@ def extract_st_patient_data(adata, patient_id):
         adata.uns['spatial'].pop(library_key, None)
         
     return adata
-
-def create_hypergraph_data_old(adata_decomp, adata_st, num_neighbor_spots=7):
-    cell_feats = torch.tensor(adata_decomp.X, dtype=torch.float)
-    spot_feats = torch.tensor(adata_st.X.toarray(), dtype=torch.float)
-
-    # map spot names to numerical position in adata_st
-    spot_name_to_index = {spot_name: i for i, spot_name in enumerate(adata_st.obs_names)}
-
-    # map cells to their corresponding spots
-    # resulting tensor has the following
-    # index: cell id, value: spot id
-    cell_to_spot_id = adata_decomp.obs['spot_name'].map(spot_name_to_index).to_numpy()
-    cell_to_spot_id = torch.from_numpy(cell_to_spot_id)
-
-    project_metadata = ProjectMetadata()
-    cell_type_mapping = project_metadata.ct_mapping
-    
-    cell_types = adata_decomp.obs[project_metadata.ct_key].map(cell_type_mapping).to_numpy()
-    cell_types = torch.from_numpy(cell_types)
-    
-    # create st graph. This graph will be the basis of our hyperedges
-    # when self loops are also computed in knn graph the self loop is also included when counting the number of nearest
-    # neighbors. For example, if k = 6, 5 edges are incident to other nodes and 1 is a self loop.
-    # The resulting edge index is a 2x(nk) matrix, with the 1st row indicating the nodes that are nearest to the node
-    # 2nd row. The 2nd row is sorted in ascending order.
-    coords = torch.from_numpy(adata_st.obsm['spatial'])
-    edge_index = knn_graph(coords, k=num_neighbor_spots, loop=True)
-    # edge_index = add_self_loops(edge_index)[0]
-
-    adj_list = edge_index[0].reshape(-1, num_neighbor_spots)
-    cell_hyperedge_list = adj_list[cell_to_spot_id]
-
-    # create hyperedge index
-    # hyperedge_members are cells belonging to incident hyperedges
-    hyperedge_members = torch.arange(adata_decomp.n_obs).repeat_interleave(num_neighbor_spots)
-    # incident_hyperedges are the hyperedges incident to each hyperedge_member
-    incident_hyperedges = cell_hyperedge_list.flatten()
-    hyperedge_index = torch.stack((hyperedge_members, incident_hyperedges))
-
-    # derive incidence matrix from hyperedge index
-    # create incidence matrix
-    incidence_matrix = torch.zeros((adata_decomp.n_obs, adata_st.n_obs), dtype=torch.float)
-    incidence_matrix[hyperedge_index[0], hyperedge_index[1]] = 1
-
-    # given incidence matrix, derive hyperedge features as mean expression of all cells in hyperedge index
-    # incidence_matrix: n_cells * n_spots
-    # cell_feats: n_cells * n_feats
-    # hyperedge_feats: n_spots * n_feats
-    hyperedge_feat_sum = incidence_matrix.T @ cell_feats
-    hyperedge_node_count = incidence_matrix.sum(dim=0).clamp(min=1)
-    hyperedge_feats = hyperedge_feat_sum / hyperedge_node_count.unsqueeze(1)
-    
-    # optional: sort the hyperedge index
-    # by sorting cell_spot_id, sorted values become the hyperedge ids sorted in ascending order,
-    # and incides indicate the cell ids grouped by their increasing hyperedge id
-    # _, idx = torch.sort(hyperedge_index[0])
-    # _, idx2 = torch.sort(hyperedge_index[1,idx], stable=True)
-    # idx_final = idx[idx2]
-    # hyperedge_index = hyperedge_index[:, idx_final]
-    cell_order = torch.argsort(hyperedge_index[0])
-    hyperedge_index = hyperedge_index[:, cell_order]
-
-    n_cell_types = ct_metadata.n_cell_types
-    n_spots = adata_st.n_obs
-    
-    return cell_feats, hyperedge_feats, cell_to_spot_id, cell_types, hyperedge_index, incidence_matrix, n_cell_types, n_spots
