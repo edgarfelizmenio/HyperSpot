@@ -1,6 +1,0 @@
-[submodule "STAMarker"]
-	path = STAMarker
-	url = https://github.com/edgarfelizmenio/STAMarker
-[submodule "SpatialScope"]
-	path = SpatialScope
-	url = https://github.com/YangLabHKUST/SpatialScope.git
