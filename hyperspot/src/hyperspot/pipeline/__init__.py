@@ -5,13 +5,6 @@ from .embedder import (
 
 from .clustering import HyperSpotClustering
 
-from .classification import SCEmbeddingSpatialClassifierDriver
-
-from .explainer import (
-    Explainer, 
-    ExplainerArgs,
-)
-
 from .selection import (
     get_ct_svg_ids,
     save_ct_svgs,

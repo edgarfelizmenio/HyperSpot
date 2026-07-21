@@ -31,9 +31,6 @@ from .pipeline import (
     HypergraphEmbedderDriver, 
     HypergraphEmbedderArgs, 
     HyperSpotClustering, 
-    SCEmbeddingSpatialClassifierDriver, 
-    Explainer, 
-    ExplainerArgs,
     run_eval,
 )
 
@@ -60,12 +57,6 @@ class EmbedderCLIArgs:
     num_hyperedges: Annotated[Optional[int], Parameter(help="Number of hyperedges (for transformers only).")] = None
     hyperedge_feats: Annotated[Optional[str], Parameter(help="Initial value of hyperedge features (for transformers only).")] = None
     hyperedge_pool: Annotated[str, Parameter(help="Pooling for the opt-in hyperedge branch: 'spot' (own-spot cells only, sharper) or 'neighborhood' (spot + neighbors, smoother).")] = "spot"
-
-@dataclass
-class ClassifierCLIArgs:
-    embedding_dim: Annotated[int, Parameter(help="The size of the embedding.")]
-    num_layers: Annotated[int, Parameter(help="The number of layers of the classifier")] = 3
-    dropout: Annotated[Optional[float], Parameter(help="Dropout parameter.")] = 0.2
 
 @dataclass
 class TrainerArgs:
@@ -104,12 +95,6 @@ class ClusterArgs:
     pc_var_floor: float = 0.04    # min fractional variance for a PC to be considered
     pc_dip_alpha: float = 0.05    # PC kept if Hartigan dip-test p < this (multimodal)
     select_min_cells: int = 500   # skip gating below this many cells (can't estimate modality)
-
-@dataclass
-class ExplainerCLIArgs:
-    n_steps: Annotated[int, Parameter(help="Number of steps performed by Integrated Gradients")] = 1000
-    batch_size: Annotated[int, Parameter(help="Number of input samples for each batch of Integrated Gradients.")] = None
-    accelerator: config.AcceleratorOptions = config.AcceleratorOptions.CUDA
 
 @app.command(help="Create a project files directory.",
              sort_key=1)
@@ -190,81 +175,7 @@ def compute_celltype_spatial_domains(project: ProjectArgs,
     clustering_driver.load_embedding_to_ct_spatial_data(clustering.embedding_key)
     clustering_driver.compute_ct_spatial_clusters(**vars(clustering))
 
-@app.command(help="Fit a classifier that maps embedding features into cell type-specific spatial domains", 
-             sort_key=6)
-def train_celltype_domain_classifiers(project: ProjectArgs,
-                     classifier: ClassifierCLIArgs,
-                     trainer: TrainerArgs):
-
-    ProjectMetadata(project.project_dir)
-    
-    driver = SCEmbeddingSpatialClassifierDriver()
-    driver.train_sc_embedding_classifiers(classifier.embedding_dim,
-                                          classifier.num_layers,
-                                          classifier.dropout,
-                                          trainer.num_epochs,
-                                          trainer.batch_size,
-                                          trainer.accelerator)
-
-@app.command(help="Given the trained classifier trained on embeddings, identify embedding dimensions that are highly attributed into each celltype-specific spatial domains.",
-             sort_key=7)
-def compute_cell_embedding_attributions(project: ProjectArgs,
-                                        classifier: ClassifierCLIArgs,
-                                        explainer: ExplainerCLIArgs,
-                                        cell_types: Optional[List[str]] = None):
-    
-    driver = Explainer(project.project_dir)
-    driver.compute_cell_type_spatial_embedding_attribution(cell_types,
-                                                           *astuple(classifier),
-                                                           ExplainerArgs(**vars(explainer)))
-
-@app.command(help="Computes the attributions of all metagenes to a certain region of a cell type.", sort_key=8)
-def compute_metagene_to_region_attribution(project: ProjectArgs,
-                                           cell_type: str,
-                                           region: int,
-                                           classifier: ClassifierCLIArgs,
-                                           explainer: ExplainerCLIArgs):
-
-    driver = Explainer(project.project_dir)
-    driver.compute_metagene_to_region_attribution(cell_type,
-                                                 region,
-                                                 *astuple(classifier),
-                                                 ExplainerArgs(**vars(explainer)))
-
-@app.command(help="Computes the attributions of genes to a cell metagene.", sort_key=9)
-def compute_gene_to_cell_metagene_attribution(project: ProjectArgs,
-                                         model: EmbedderCLIArgs,
-                                         explainer: ExplainerCLIArgs,
-                                         idx: Annotated[Optional[List[str]], Parameter(help="Indexes of metagenes where attributions have to be computed. If nothing is provided, computes the attributions of all features to all metagenes.")] = None):
-    
-    hypergraph = STHypergraphData.load(project.project_dir)
-    driver = Explainer(project.project_dir)
-    driver.compute_cell_feature_to_cell_metagene_attribution(hypergraph,
-                                                             HypergraphEmbedderArgs(**vars(model)),
-                                                             ExplainerArgs(**vars(explainer)),
-                                                             idx)
-
-@app.command(help="Computes the attributions of genes to a celltype spatial domain.", sort_key=10)
-def compute_gene_to_celltype_domain_attribution(project: ProjectArgs,
-                                              cell_type: str,
-                                              model: EmbedderCLIArgs,
-                                              classifier: ClassifierCLIArgs,
-                                              explainer: ExplainerCLIArgs):
-    ProjectMetadata(project.project_dir)
-    
-    hypergraph = STHypergraphData.load()
-
-    assert model.embedding_dim == classifier.embedding_dim
-    
-    driver = Explainer()
-    driver.compute_g2ctd_attribution(cell_type,
-                                     hypergraph,
-                                     HypergraphEmbedderArgs(**vars(model)),
-                                     classifier.dropout,
-                                     classifier.num_layers,
-                                     ExplainerArgs(**vars(explainer)))
-
-@app.command(help="Run evaluation test.", sort_key=11)
+@app.command(help="Run evaluation test.", sort_key=6)
 def perform_model_evaluation(
     project: ProjectArgs,         
     model: EmbedderCLIArgs,
@@ -288,7 +199,7 @@ def perform_model_evaluation(
     )
 
 @app.command(help="Check if project folder exists.",
-             sort_key=12)
+             sort_key=7)
 def folder_test(project: ProjectArgs):
     if project.project_dir.exists():
         print(f"Folder {project.project_dir} exists!")
