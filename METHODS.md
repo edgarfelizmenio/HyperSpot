@@ -1,27 +1,27 @@
-# HGCTSVG — Methods
+# HyperSpot — Methods
 
 ## Biological Target
 
-HGCTSVG detects **cell-type-specific domain marker SVGs** — genes that distinguish spatial domains within a cell type. This is a biologically distinct subcategory of ctSVGs:
+HyperSpot detects **cell-type-specific domain marker SVGs** — genes that distinguish spatial domains within a cell type. This is a biologically distinct subcategory of ctSVGs:
 
 - **ctSVG** (oracle definition): any gene with spatial autocorrelation within a cell type (Moran's I / R² based)
-- **Domain marker ctSVG** (HGCTSVG): a gene that marks a specific spatial domain within a cell type (Wilcoxon DE between domains)
+- **Domain marker ctSVG** (HyperSpot): a gene that marks a specific spatial domain within a cell type (Wilcoxon DE between domains)
 
-A smooth gradient gene has high Moran's I but does not cleanly separate spatial domains. A niche-specific gene may be a strong domain marker with moderate global Moran's I. Domain marker ctSVGs are a proper subset of ctSVGs. The Wilcoxon scoring in HGCTSVG correctly tests the domain marker hypothesis — replacing it with Moran's I would make HGCTSVG redundant with CELINA/STANCE.
+A smooth gradient gene has high Moran's I but does not cleanly separate spatial domains. A niche-specific gene may be a strong domain marker with moderate global Moran's I. Domain marker ctSVGs are a proper subset of ctSVGs. The Wilcoxon scoring in HyperSpot correctly tests the domain marker hypothesis — replacing it with Moran's I would make HyperSpot redundant with CELINA/STANCE.
 
-The apparent oracle–method mismatch (high FDR against the Moran's I oracle) reflects this difference in biological definition, not a calibration failure. A better oracle for HGCTSVG is the **spot co-membership Moran's I** (see ctsvg-benchmark-sim METHODS/roadmap).
+The apparent oracle–method mismatch (high FDR against the Moran's I oracle) reflects this difference in biological definition, not a calibration failure. A better oracle for HyperSpot is the **spot co-membership Moran's I** (see ctsvg-benchmark-sim METHODS/roadmap).
 
 ---
 
 ## ctSVG Scoring for Benchmarking Evaluation
 
-This section describes `compute_ct_svg_scores` in `hgctsvg/pipeline/results.py`, which produces per-(gene, cell type) scores for comparison against CELINA, STANCE, and other ctSVG detection methods using the standard benchmarking evaluation metrics (EP, AUPRC, FDP, Power, KS distance, Type I error).
+This section describes `compute_ct_svg_scores` in `hyperspot/pipeline/results.py`, which produces per-(gene, cell type) scores for comparison against CELINA, STANCE, and other ctSVG detection methods using the standard benchmarking evaluation metrics (EP, AUPRC, FDP, Power, KS distance, Type I error).
 
 ### Background
 
-HGCTSVG identifies ctSVGs by clustering cells of a given cell type into spatial domains (via hypergraph-based embedding and Leiden clustering), then running differential expression analysis across those domains. The primary output is a filtered, domain-level gene list per cell type — genes that are significantly upregulated in at least one spatial domain compared to all other domains of the same cell type.
+HyperSpot identifies ctSVGs by clustering cells of a given cell type into spatial domains (via hypergraph-based embedding and Leiden clustering), then running differential expression analysis across those domains. The primary output is a filtered, domain-level gene list per cell type — genes that are significantly upregulated in at least one spatial domain compared to all other domains of the same cell type.
 
-This domain-level structure differs from methods like CELINA and STANCE, which output a single p-value per (gene, cell type) pair. A direct evaluation comparison therefore requires aggregating HGCTSVG's domain-level results into a single score per (gene, cell type).
+This domain-level structure differs from methods like CELINA and STANCE, which output a single p-value per (gene, cell type) pair. A direct evaluation comparison therefore requires aggregating HyperSpot's domain-level results into a single score per (gene, cell type).
 
 ### Biological Rationale
 
@@ -66,15 +66,15 @@ For each cell type:
 | KS distance | ✅ | Raw p-values available for null genes |
 | Type I error | ✅ | Raw p-values available for null genes |
 
-All six standard benchmarking metrics are computable. This is in contrast to HGCTSVG's filtered pipeline output (which retains only significant, upregulated, well-expressed genes), which would preclude KS distance and Type I error computation.
+All six standard benchmarking metrics are computable. This is in contrast to HyperSpot's filtered pipeline output (which retains only significant, upregulated, well-expressed genes), which would preclude KS distance and Type I error computation.
 
 ### Usage
 
 ```python
-from hgctsvg.pipeline.results import compute_ct_svg_scores
+from hyperspot.pipeline.results import compute_ct_svg_scores
 
 compute_ct_svg_scores(
-    out_dir="results/1_Human_Breast_Cancer/HGCTSVG",
+    out_dir="results/1_Human_Breast_Cancer/HyperSpot",
     key="domain",  # obs column containing spatial domain labels
 )
 ```
