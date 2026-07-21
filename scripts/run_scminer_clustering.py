@@ -12,7 +12,7 @@ Must be run in the scMiner conda environment:
 Output: one CSV per cell type at <out_dir>/<ct_safe>.csv with columns:
     cell_id, cluster
 These can be loaded by ClusterEvaluation.compute_CT_spotiphy_scores() in the
-HGCTSVG environment without requiring scMiner.
+HyperSpot environment without requiring scMiner.
 """
 
 import argparse

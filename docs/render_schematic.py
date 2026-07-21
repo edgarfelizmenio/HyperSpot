@@ -22,7 +22,7 @@ def plabel(x,txt,c=SOFT):
     ax.text(x,80,txt,ha="center",va="center",fontsize=11.5,color=c,fontweight="bold")
 
 # header
-ax.text(4,89.4,"HGCTSVG · CTHGCAEv4",fontsize=10,color=FAINT,fontweight="bold",family="monospace")
+ax.text(4,89.4,"HyperSpot · CTHGCAEv4",fontsize=10,color=FAINT,fontweight="bold",family="monospace")
 ax.text(4,85.3,"Type-aware hyperedge encoder — how one cell's neighborhood becomes its embedding",
         fontsize=16.5,color=INK,fontweight="bold")
 

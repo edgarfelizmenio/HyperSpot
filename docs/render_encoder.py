@@ -41,7 +41,7 @@ def rail(y0,y1):
     ax.plot([5.2,5.2],[y0,y1],color="#c7d3cf",lw=2,zorder=1)
 
 # ── header
-ax.text(8,172,"HGCTSVG · model/hypergraph/cthgcaev4.py",fontsize=9.5,color=FAINT,
+ax.text(8,172,"HyperSpot · model/hypergraph/cthgcaev4.py",fontsize=9.5,color=FAINT,
         fontweight="bold",family="monospace")
 ax.text(8,167.5,"CTHGCAEv4 — the type-aware hyperedge encoder",fontsize=19,color=INK,fontweight="bold")
 ax.text(8,163.6,"Each hyperedge is resolved into K per-type channels (each ÷ its own count),",fontsize=10.5,color=SOFT)
