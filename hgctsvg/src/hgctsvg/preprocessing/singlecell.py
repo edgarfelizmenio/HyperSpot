@@ -58,7 +58,7 @@ def perform_ct_feature_selection(n_features = 3000):
         pickle.dump(ct_feats, ctff)
 
 def compute_feature_genes(adata_ct, n_features=3000, use_spatial=False):
-    sc.pp.filter_genes(adata_ct, min_cells=1)
+    # sc.pp.filter_genes(adata_ct, min_cells=1)
     genes = adata_ct.var_names
 
     sc.pp.highly_variable_genes(adata_ct, flavor="seurat")

@@ -25,7 +25,7 @@ class CTHGCAEEncoderv2(CTHyFiHGNNv1):
         de_inv = (de ** -1).diag()
         de_inv[de_inv == float('inf')] = 0
 
-        node_feats = self.dropout(node_feats)
+        # node_feats = self.dropout(node_feats)
 
         hyperedge_embeddings = (
             de_inv @ incidence_matrix.t() @ dv_invsqrt
@@ -75,7 +75,7 @@ class CTHGCAEv2(nn.Module):
 
     def __init__(self, num_cell_types, input_dim, embedding_dim, dropout=0.1):
         super().__init__()
-        self.encoder = CTHGCAEEncoderv2(input_dim, embedding_dim, dropout)
+        self.encoder = CTHGCAEEncoderv2(num_cell_types, input_dim, embedding_dim, dropout)
         self.decoder = CTLinearDecoder(num_cell_types, embedding_dim, input_dim)
 
     @staticmethod
@@ -97,15 +97,9 @@ class CTHGCAEv2(nn.Module):
 class CTHGCAEv2Embedder(HypergraphEmbedder):
 
     @classmethod
-    def _build_impl(cls, args: HypergraphEmbedderArgs):
-        # num_cell_types inferred from project metadata; fallback to 12
-        try:
-            from ...metadata import ProjectMetadata
-            num_ct = ProjectMetadata().n_cell_types
-        except Exception:
-            num_ct = 12
+    def _build_impl(cls, args: HypergraphEmbedderArgs, n_cell_types: int):
         model = CTHGCAEv2(
-            num_cell_types=num_ct,
+            num_cell_types=n_cell_types,
             input_dim=args.input_dim,
             embedding_dim=args.embedding_dim,
             dropout=args.dropout,

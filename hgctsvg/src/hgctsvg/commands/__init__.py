@@ -35,7 +35,8 @@ class EmbedderCLIArgs:
     input_dim: Annotated[int, Parameter(help="Number of input features.")]
     embedding_dim: Annotated[int, Parameter(help="Size of embedding.")]
     dropout: Annotated[Optional[float], Parameter(help="Dropout parameter.")] = 0.1
-    
+    hyperedge_pool: str = "spot"          # "spot" (own-spot cells) | "neighborhood"
+
 @dataclass
 class ClassifierCLIArgs:
     embedding_dim: Annotated[int, Parameter(help="The size of the embedding.")]
@@ -45,7 +46,22 @@ class ClassifierCLIArgs:
 class TrainerArgs:
     num_epochs: int = 100
     batch_size: int = 8192
-    accelerator: AcceleratorOptions = AcceleratorOptions.CUDA    
+    accelerator: AcceleratorOptions = AcceleratorOptions.CUDA
+
+@dataclass
+class RegularizerArgs:
+    """Opt-in, per-cell-type training regularizers (all default off)."""
+    lambda_var: float = 0.0
+    lambda_cov: float = 0.0
+    lambda_nbr: float = 0.0
+    temp_nbr: float = 0.5
+    edge_preserving: bool = True
+    reg_weight: float = 0.0
+    optimize_hyperedges: bool = False
+    rho_h: float = 1.0
+    lambda_var_h: float = 0.0
+    lambda_cov_h: float = 0.0
+    lambda_nbr_h: float = 0.0
 
 @dataclass
 class ClusterDataArgs:
@@ -69,7 +85,8 @@ def init_project_files_dir():
 
 def train_embedder(project: ProjectArgs,
          model: EmbedderCLIArgs,
-         trainer: TrainerArgs):
+         trainer: TrainerArgs,
+         regularizer: RegularizerArgs = RegularizerArgs()):
 
     hypergraph = STHypergraphData.load(project.project_dir)
 
@@ -81,9 +98,20 @@ def train_embedder(project: ProjectArgs,
     
     embedder.fit(hypergraph,
                  HypergraphEmbedderArgs(**vars(model)),
-                 trainer.num_epochs, 
+                 trainer.num_epochs,
                  trainer.batch_size,
-                 trainer.accelerator)
+                 trainer.accelerator,
+                 lambda_var=regularizer.lambda_var,
+                 lambda_cov=regularizer.lambda_cov,
+                 lambda_nbr=regularizer.lambda_nbr,
+                 temp_nbr=regularizer.temp_nbr,
+                 edge_preserving=regularizer.edge_preserving,
+                 reg_weight=regularizer.reg_weight,
+                 optimize_hyperedges=regularizer.optimize_hyperedges,
+                 rho_h=regularizer.rho_h,
+                 lambda_var_h=regularizer.lambda_var_h,
+                 lambda_cov_h=regularizer.lambda_cov_h,
+                 lambda_nbr_h=regularizer.lambda_nbr_h)
 
 def make_embedding(project: ProjectArgs,
                    model: EmbedderCLIArgs,

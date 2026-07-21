@@ -24,6 +24,8 @@ def save_aggr_st_data(adata_aggr):
 
 def load_aggr_st_data():
     adata_aggr = sc.read_h5ad(ProjectMetadata().project_folder / 'ST_aggregated.h5ad')
+    if 'domain' in adata_aggr.obs:   # ensure discrete for plotting (squidpy/scanpy)
+        adata_aggr.obs['domain'] = adata_aggr.obs['domain'].astype('category')
     return adata_aggr
 
 def save_ct_spatial_data(adata_ct, cell_type: str):
@@ -33,7 +35,10 @@ def save_ct_spatial_data(adata_ct, cell_type: str):
 def load_ct_spatial_data(cell_type: str):
     # load adata for cell type
     adata_ct = sc.read_h5ad(ProjectMetadata().ct_data_dir / f"ST_cell_{cell_type}.h5ad")
+    if 'domain' in adata_ct.obs:      # ensure discrete for plotting (squidpy/scanpy)
+        adata_ct.obs['domain'] = adata_ct.obs['domain'].astype('category')
     return adata_ct
+
 
 def get_gene_minmax(adata, gene_name):
     index = adata.var_names.get_loc(gene_name)

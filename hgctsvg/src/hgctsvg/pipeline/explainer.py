@@ -179,7 +179,7 @@ class Explainer(object):
         project_metadata = ProjectMetadata()
         
         self.device = get_device(explainer_args.accelerator)
-        self.embedder = HypergraphEmbedder.build(embedder_args)
+        self.embedder = HypergraphEmbedder.build(embedder_args, project_metadata.n_cell_types)
         self.embedder.load_checkpoint()
         self.embedder.to(self.device)
         self.embedder.eval()

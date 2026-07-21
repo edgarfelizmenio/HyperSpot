@@ -37,19 +37,21 @@ def HGCTSVG_eval_pipeline(
     min_cluster_pct=0.05,
     copy_var_cols=None,
     seed: int = 0,
+    n_pca_components: int = 50,
 ):
-    
+
     project_metadata = ProjectMetadata()
-    
+
     # representation learning
     hypergraph = STHypergraphData.load()
     embedder = HypergraphEmbedderDriver()
     embedder.fit(
-        hypergraph,         
+        hypergraph,
         args,
-        num_epochs, 
-        batch_size,         
-        accelerator
+        num_epochs,
+        batch_size,
+        accelerator,
+        seed=seed,
     )
     embedder.generate_embedding(hypergraph,
                                 args,
@@ -63,14 +65,20 @@ def HGCTSVG_eval_pipeline(
     clustering_driver.load_embedding_to_aggr_data(embedding_key)
     clustering_driver.compute_spatial_clusters(
         embedding_key=embedding_key,
-        min_cluster_pct=-1
+        algorithm=algorithm,
+        min_cluster_pct=-1,
+        seed=seed,
+        n_pca_components=n_pca_components,
     )
-    
+
     # clustering cell type domains
     clustering_driver.load_embedding_to_ct_spatial_data(embedding_key)
     clustering_driver.compute_ct_spatial_clusters(
-        embedding_key=embedding_key,                                          
-        min_cluster_pct=min_cluster_pct
+        embedding_key=embedding_key,
+        algorithm=algorithm,
+        min_cluster_pct=min_cluster_pct,
+        seed=seed,
+        n_pca_components=n_pca_components,
     )
     
     run_dir = project_metadata.eval_dir / f"run_{run_number}"
@@ -102,12 +110,35 @@ def run_eval(
     embedding_key="embedding",
     algorithm="leiden",
     min_cluster_pct=0.05,
-    seeds=None,
+    n_pca_components=50,
+    n=len(EVAL_SEEDS),
 ):
-    if seeds is None:
-        seeds = EVAL_SEEDS
 
-    for run_number, seed in enumerate(seeds):
+    n = min(n, len(EVAL_SEEDS))
+
+    # Resume support: a run_<i> directory is only created once that run's
+    # clustering completes, so existing directories mark finished runs. Continue
+    # from the next index after the highest existing one, reusing the seed tied
+    # to that index (run_i always uses EVAL_SEEDS[i]). Delete a run_<i> directory
+    # to force that run to be recomputed on the next invocation.
+    eval_dir = ProjectMetadata().eval_dir
+    existing = [
+        int(p.name[len("run_"):])
+        for p in eval_dir.glob("run_*")
+        if p.is_dir() and p.name[len("run_"):].isdigit()
+    ]
+    start = max(existing) + 1 if existing else 0
+
+    if start >= n:
+        print(f"Found {len(existing)} existing run(s) (up to run_{max(existing)}); "
+              f"nothing to do for num_runs={n}.")
+        return
+
+    print(f"Resuming model evaluation: running run_{start}..run_{n - 1} "
+          f"with seeds {EVAL_SEEDS[start:n]}.")
+
+    for run_number in range(start, n):
+        seed = EVAL_SEEDS[run_number]
         HGCTSVG_eval_pipeline(
             run_number,
             args,
@@ -118,6 +149,7 @@ def run_eval(
             algorithm=algorithm,
             min_cluster_pct=min_cluster_pct,
             seed=seed,
+            n_pca_components=n_pca_components,
         )
 
 class ClusterEvaluation(object):

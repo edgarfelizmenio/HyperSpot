@@ -13,7 +13,8 @@ class ProjectMetadata:
         "clustering_dir": "clustering",
         "ct_data_dir": "ct_spatial_data",
         "plot_dir": "plots",
-        "eval_dir": "evaluation"
+        "eval_dir": "evaluation",
+        "domain_markers_dir": "domain_markers",
     }
     
     def __init__(self, project_folder=None):

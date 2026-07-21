@@ -41,14 +41,15 @@ class HypergraphEmbedderDriver(object):
         
         logger.info("Initializing model...")
     
-    def __setup_model(self, 
-                      args: HypergraphEmbedderArgs, 
+    def __setup_model(self,
+                      args: HypergraphEmbedderArgs,
                       accelerator: AcceleratorOptions):
-        
+
         self.device = get_device(accelerator)
 
-        self.model = HypergraphEmbedder.build(args)
-        self.cl_model = HyFiAE(self.model, args.embedding_dim) 
+        n_cell_types = ProjectMetadata().n_cell_types
+        self.model = HypergraphEmbedder.build(args, n_cell_types)
+        self.cl_model = HyFiAE(self.model, args.embedding_dim)
         self.cl_model.to(self.device)
         
     def fit(self,
@@ -57,7 +58,18 @@ class HypergraphEmbedderDriver(object):
             num_epochs: int,
             batch_size: int,
             accelerator: AcceleratorOptions,
-            seed: int = 42):
+            seed: int = 42,
+            lambda_var: float = 0.0,
+            lambda_cov: float = 0.0,
+            lambda_nbr: float = 0.0,
+            temp_nbr: float = 0.5,
+            edge_preserving: bool = True,
+            reg_weight: float = 0.0,
+            optimize_hyperedges: bool = False,
+            rho_h: float = 1.0,
+            lambda_var_h: float = 0.0,
+            lambda_cov_h: float = 0.0,
+            lambda_nbr_h: float = 0.0):
 
         project_metadata = ProjectMetadata()
 
@@ -70,17 +82,39 @@ class HypergraphEmbedderDriver(object):
         np.random.seed(seed)
         random.seed(seed)
 
+        # hyperedge autoencoder branch is opt-in (optimize_hyperedges). When on,
+        # the model needs a real (M × G) hyperedge_feats matrix to size/target the
+        # decoder; a legacy degree vector is a hard error rather than a silent no-op.
+        self.optimize_hyperedges = optimize_hyperedges
+        _hf = hypergraph["hyperedge_feats"]
+        if optimize_hyperedges:
+            if _hf.dim() != 2:
+                raise ValueError(
+                    "optimize_hyperedges=True requires 2-D hyperedge_feats "
+                    "(spot-basis pseudobulk). Rebuild the hypergraph with "
+                    "n_hyperedge_feats>0.")
+            embedder_args.hyperedge_feat_dim = _hf.shape[1]
+        else:
+            embedder_args.hyperedge_feat_dim = None
+
         self.__setup_model(embedder_args,
                            accelerator)
-        self.criterion = HGCTCAELoss(embedder_args.embedding_dim,
-                                     n_classes = 12,
-                                     temp_intraclass = 1.5,
-                                     temp_interclass = 0.5,
-                                     alpha=0.0,
-                                     beta=0.0,
-                                     gamma=0.0,
-                                     rho=1.0)
-        self.__configure_optimizer()
+        self.criterion = HGCTCAELoss(rho=1.0,
+                                     # per-cell-type embedding regularizers (opt-in; default off)
+                                     lambda_var=lambda_var,   # anti-collapse: variance hinge
+                                     lambda_cov=lambda_cov,   # anti-collapse: decorrelation
+                                     lambda_nbr=lambda_nbr,   # neighborhood contrastive
+                                     temp_nbr=temp_nbr,
+                                     edge_preserving=edge_preserving,  # bilateral (expr-gated) nbr pull
+                                     # hyperedge autoencoder branch (opt-in)
+                                     optimize_hyperedges=optimize_hyperedges,
+                                     rho_h=rho_h,
+                                     lambda_var_h=lambda_var_h,
+                                     lambda_cov_h=lambda_cov_h,
+                                     lambda_nbr_h=lambda_nbr_h)
+        # weight on the model's own regularizer (e.g. v4 cross-type gate L1)
+        self.reg_weight = reg_weight
+        self.__configure_optimizer(num_epochs)
         self.criterion.to(self.device)
         
         self.cl_model.train()
@@ -109,27 +143,28 @@ class HypergraphEmbedderDriver(object):
                 # create function for 1 epoch that returns the loss
                 num_batches = len(hgloader)
                 epoch_loss = 0.0
+                epoch_node = 0.0
+                epoch_hedge = 0.0
                 with tqdm(hgloader, leave=False, position=1) as b_pbar:
                     for batch in b_pbar:
                         self.optimizer.zero_grad()
-                        loss = self.__step_batch(batch)
+                        loss, node_total, hyperedge_total = self.__step_batch(batch)
                         loss.backward()
                         self.optimizer.step()
-                        epoch_loss += loss.item()
 
-                        num_nodes = batch.batch_subgraph_cells.shape[0]
-                        num_hyperedges = batch.batch_subgraph_hyperedges.shape[0]
-                        
-                        b_pbar.set_postfix({'loss': loss.item(),
-                                            'n_cells': batch.sample_n_cells,
-                                            'n_hyperedges': batch.sample_n_hyperedges,
-                                            'cl_n_cells': batch.neighborhood_n_cells,
-                                            'cl_n_hyperedges': batch.neighborhood_n_hyperedges,
-                                            'nodes': num_nodes,
-                                            'hyperedges': num_hyperedges})
+                        l, n, h = loss.item(), node_total.item(), hyperedge_total.item()
+                        epoch_loss += l
+                        epoch_node += n
+                        epoch_hedge += h
+
+                        b_pbar.set_postfix({'loss': l, 'node': n, 'hedge': h})
                         gc.collect()
-                        
+
                 epoch_loss /= num_batches
+                epoch_node /= num_batches
+                epoch_hedge /= num_batches
+
+                self.scheduler.step()   # cosine lr anneal, once per epoch
 
                 # TODO save best model
                 if not max_epoch_loss or epoch_loss > max_epoch_loss:
@@ -146,42 +181,60 @@ class HypergraphEmbedderDriver(object):
                     torch.save(checkpoint, project_metadata.project_folder / f'{self.model.checkpoint_name()}.pth')
 
                 e_pbar.set_postfix({
-                    'epoch_loss': epoch_loss, 
+                    'epoch_loss': epoch_loss,
+                    'node': epoch_node,
+                    'hedge': epoch_hedge,
                     'max_loss': max_epoch_loss,
-                    'min_loss': min_epoch_loss})
+                    'min_loss': min_epoch_loss,
+                    'lr': self.scheduler.get_last_lr()[0]})
 
                     
-    def __configure_optimizer(self):
+    def __configure_optimizer(self, num_epochs):
         self.optimizer = optim.Adam(list(self.cl_model.parameters()) + list(self.criterion.parameters()), lr=0.001)
+        # default schedule: cosine-anneal the lr toward ~0 over the whole run,
+        # stepped once per epoch (sharpens late convergence)
+        self.scheduler = optim.lr_scheduler.CosineAnnealingLR(self.optimizer, T_max=num_epochs)
                 
     def __step_batch(self, batch: STHypergraphBatchMatrixData):
 
         batch = batch.to_device(self.device)        
 
         if self.cl_model.training:
-            (node_embeddings, 
-             hyperedge_embeddings, 
-             # augmented_node_embeddings, 
+            (node_embeddings,
+             hyperedge_embeddings,
+             # augmented_node_embeddings,
              # augmented_hyperedge_embeddings,
-             reconstruction) = self.cl_model(batch)
+             reconstruction,
+             hyperedge_reconstruction) = self.cl_model(batch)
 
-            contrastive_loss = self.criterion(batch.batch_cell_feats[:batch.neighborhood_n_cells],
+            n_h = batch.neighborhood_n_hyperedges
+            contrastive_loss, node_total, hyperedge_total = self.criterion(
+                                              batch.batch_cell_feats[:batch.neighborhood_n_cells],
                                               reconstruction[:batch.neighborhood_n_cells],
-                                              # node_embeddings[:batch.neighborhood_n_cells], 
-                                              # hyperedge_embeddings[:batch.neighborhood_n_hyperedges], 
-                                              # augmented_node_embeddings[:,:batch.neighborhood_n_cells],
-                                              # augmented_hyperedge_embeddings[:,:batch.neighborhood_n_hyperedges], 
-                                              # batch.neighborhood_incidence_matrix,
+                                              node_embeddings[:batch.neighborhood_n_cells],
+                                              batch.neighborhood_incidence_matrix,
                                               batch.batch_cell_types[:batch.neighborhood_n_cells],
                                               batch.sample_n_cells,
-                                              batch.sample_n_hyperedges)
-            
-            return contrastive_loss
+                                              batch.sample_n_hyperedges,
+                                              hyperedge_embeddings=hyperedge_embeddings[:n_h],
+                                              hyperedge_recon=(hyperedge_reconstruction[:n_h]
+                                                               if hyperedge_reconstruction is not None else None),
+                                              hyperedge_feats=batch.batch_hyperedge_feats[:n_h])
+
+            # optional model-side regularizer (e.g. v4 cross-type gate L1) — counts
+            # toward the node total so total == node_total + hyperedge_total
+            encoder = getattr(getattr(self.model, "model", None), "encoder", None)
+            if encoder is not None and hasattr(encoder, "regularization_loss"):
+                gate = self.reg_weight * encoder.regularization_loss()
+                contrastive_loss = contrastive_loss + gate
+                node_total = node_total + gate.detach()
+
+            return contrastive_loss, node_total, hyperedge_total
         
         else:
-            node_embeddings, hyperedge_embeddings, _ = self.model(batch)
-            
-            return node_embeddings, hyperedge_embeddings
+            out = self.model(batch)   # 3- or 4-tuple depending on the model
+
+            return out[0], out[1]      # node_embeddings, hyperedge_embeddings
         
     def generate_embedding(self,
                            hypergraph: STHypergraphData,

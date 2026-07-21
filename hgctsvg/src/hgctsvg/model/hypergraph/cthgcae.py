@@ -8,10 +8,10 @@ from .cthgnn import CTHyFiHGNNv1
 from ..moduledict import LinearDict, ParameterDict
 
 class CTHGCAE(nn.Module):
-    def __init__(self, input_dim, embedding_dim, dropout=0.1):
+    def __init__(self, n_cell_types, input_dim, embedding_dim, dropout=0.1):
         super(CTHGCAE, self).__init__()
-        self.encoder = CTHyFiHGNNv1(input_dim, embedding_dim, dropout)
-        self.decoder = CTHyFiHGNNv1(embedding_dim, input_dim, dropout=0)
+        self.encoder = CTHyFiHGNNv1(n_cell_types, input_dim, embedding_dim, dropout)
+        self.decoder = CTHyFiHGNNv1(n_cell_types, embedding_dim, input_dim, dropout=0)
 
     def forward(self, node_feats, cell_types, incidence_matrix):
         node_embeddings, hyperedge_embeddings = self.encoder(node_feats,
@@ -28,11 +28,12 @@ class CTHGCAE(nn.Module):
 class CTHGCAEEmbedder(HypergraphEmbedder):
 
     @classmethod
-    def _build_impl(cls, args: HypergraphEmbedderArgs):
+    def _build_impl(cls, args: HypergraphEmbedderArgs, n_cell_types: int):
         model = CTHGCAE(
+            n_cell_types,
             args.input_dim,
             args.embedding_dim,
-            args.dropout
+            args.dropout,
         )
         return cls(model)
 

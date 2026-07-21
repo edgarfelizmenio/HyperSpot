@@ -56,8 +56,10 @@ def plot_all_ct_domains(n_cols = 4, figsize: tuple = (20, 15)):
             cell_type = type_list[i]
             
             adata_celltype = load_ct_spatial_data(cell_type)
-            # np_clusters = adata_celltype.obs["leiden"].to_numpy().astype("int")
-        
+            # domain may be saved as plain strings; squidpy needs it categorical
+            # to plot as discrete (else it parses labels like '2' as colors)
+            adata_celltype.obs['domain'] = adata_celltype.obs['domain'].astype('category')
+
             sq.pl.spatial_scatter(
                 adata_celltype,
                 color='domain',
@@ -65,6 +67,8 @@ def plot_all_ct_domains(n_cols = 4, figsize: tuple = (20, 15)):
                 title=cell_type,
                 legend_loc=None
             )
+
+            ax.set(xlabel=None, ylabel=None)
 
         else:
             fig.delaxes(ax)

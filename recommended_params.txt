@@ -1,0 +1,1 @@
+--regularizer.lambda-var 0.25 --regularizer.lambda-cov 0.1 --regularizer.lambda-nbr 0.5 --regularizer.temp-nbr 0.5 --regularizer.reg-weight 1e-3

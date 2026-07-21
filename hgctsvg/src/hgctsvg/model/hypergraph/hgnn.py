@@ -47,7 +47,7 @@ class HyFiHGNN(nn.Module):
 class HyFiEmbedder(HypergraphEmbedder):
 
     @classmethod
-    def _build_impl(cls, args: HypergraphEmbedderArgs):
+    def _build_impl(cls, args: HypergraphEmbedderArgs, n_cell_types: int):
         model = HyFiHGNN(
             args.input_dim,
             args.embedding_dim,

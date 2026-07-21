@@ -16,9 +16,10 @@ def plot_region(adata, region_id, ax, region_key="domain"):
         title=f"EC region: {region_id}",
     )
 
-def plot_domain_svgs(adata, top_genes, regions = list[str], 
+def plot_domain_svgs(adata, top_genes, regions = list[str],
                              figsize=(4, 4), n_cols = 4, use_raw=False,
-                             save=True, transparent=True, file_ext='png'):
+                             save=True, transparent=True, file_ext='png',
+                             generic_title=False):
 
     project_metadata = ProjectMetadata()
     
@@ -56,11 +57,12 @@ def plot_domain_svgs(adata, top_genes, regions = list[str],
                 ax=ax_region,
                 legend_loc=None
             )
+            expr_title = f"region {region} ct-SVG" if generic_title else f"{gene_name}: {score:0.4}"
             sq.pl.spatial_scatter(
                 adata_plot,
                 color = gene_id,
                 ax = ax_expr,
-                title=f"{gene_name}: {score:0.4}",
+                title=expr_title,
                 use_raw=use_raw,
                 vmin=vmin,
                 vmax=vmax,
@@ -160,7 +162,11 @@ def plot_domain_ct_svgs(adata,
                         figsize: tuple = (20, 15), 
                         limit=12,
                         use_raw = False):
- 
+
+    if len(ct_svgs) == 0:
+        print(f"region {region}: no ct-SVGs to plot — skipping.")
+        return
+
     adata_region = adata[adata.obs['domain'] == str(region)]
 
     fig, axes = plt.subplots(1, 2, figsize=(20,10))

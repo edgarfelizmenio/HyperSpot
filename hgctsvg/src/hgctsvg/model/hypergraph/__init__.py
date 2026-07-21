@@ -23,6 +23,8 @@ class HypergraphEmbedderArgs:
     num_blocks: Optional[int] = None
     num_hyperedges: Optional[int] = None
     hyperedge_feats: Optional[str] = None
+    hyperedge_feat_dim: Optional[int] = None
+    hyperedge_pool: str = "spot"          # "spot" (own-spot cells) | "neighborhood"
 
     
 class HypergraphEmbedder(nn.Module, ABC):
@@ -39,7 +41,10 @@ class HypergraphEmbedder(nn.Module, ABC):
         project_metadata = ProjectMetadata()
         path = project_metadata.project_folder / f'{self.checkpoint_name()}.pth'
         state = torch.load(path, weights_only=True)
-        self.load_state_dict(state['embedder_state_dict'])
+        # strict=False: a model trained with the opt-in hyperedge decoder carries
+        # extra hyperedge_decoder.* keys that inference doesn't rebuild (its output
+        # is discarded at embedding time); tolerate those rather than error.
+        self.load_state_dict(state['embedder_state_dict'], strict=False)
     
     @classmethod
     def register(cls, name: str):
@@ -55,14 +60,14 @@ class HypergraphEmbedder(nn.Module, ABC):
         return list(cls._registry.keys())
     
     @classmethod
-    def build(cls, args: HypergraphEmbedderArgs) -> HypergraphEmbedder:
+    def build(cls, args: HypergraphEmbedderArgs, n_cell_types: int) -> HypergraphEmbedder:
         try:
             subcls = cls._registry[args.model_name]
         except KeyError:
             raise ValueError(f"Unknown model: {args.model_name}")
 
-        embedder_model = subcls._build_impl(args)
-        
+        embedder_model = subcls._build_impl(args, n_cell_types)
+
         return embedder_model
 
     @classmethod
@@ -92,3 +97,8 @@ from .transformer import HGTransformerEmbedder
 from .cthgnn import CTHyFiEmbedder
 from .cthgcae import CTHGCAEEmbedder
 from .cthgcaev2 import CTHGCAEv2Embedder
+from .cthgcaev3 import CTHGCAEv3Embedder
+from .cthgcaev4 import CTHGCAEv4Embedder
+from .cthgcaev5 import CTHGCAEv5Embedder
+from .cthgcaev6 import CTHGCAEv6Embedder
+from .cthgcaev7 import CTHGCAEv7Embedder

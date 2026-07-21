@@ -155,7 +155,6 @@ def set_segmentation_masks(adata, segmentation_boundary):
     
     print(f"Prepared hires segmentation: {seg_mask.shape}, {seg_mask.max()} cells")
 
-
 def get_common_geneset(adata_st, adata_sc):
     st_hvg = adata_st.var[adata_st.var['highly_variable']].index
     sc_hvg = adata_sc.var[adata_sc.var['highly_variable']].index

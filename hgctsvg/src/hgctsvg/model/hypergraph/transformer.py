@@ -223,7 +223,7 @@ class STHypergraphTransformer(nn.Module):
 class HGTransformerEmbedder(HypergraphEmbedder):
 
     @classmethod
-    def _build_impl(cls, args: HypergraphEmbedderArgs):
+    def _build_impl(cls, args: HypergraphEmbedderArgs, n_cell_types: int):
         model = STHypergraphTransformer(
             args.input_dim,
             args.latent_dim,

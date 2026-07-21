@@ -276,8 +276,14 @@ class HyFiAE(nn.Module):
         return aug_feats
     
     def forward(self, batch):
-        # forward on original data
-        node_embeddings, hyperedge_embeddings, reconstruction = self.encoder(batch)
+        # forward on original data. Models with the opt-in hyperedge decoder
+        # return a 4th value (hyperedge reconstruction); others return 3.
+        out = self.encoder(batch)
+        if len(out) == 4:
+            node_embeddings, hyperedge_embeddings, reconstruction, hyperedge_reconstruction = out
+        else:
+            node_embeddings, hyperedge_embeddings, reconstruction = out
+            hyperedge_reconstruction = None
         
         # make multiple views
         # augmented_node_embeddings = torch.zeros((self.num_views, batch.batch_subgraph_cells.shape[0], self.embedding_dim)).to(batch.batch_cell_feats.device)
@@ -288,6 +294,6 @@ class HyFiAE(nn.Module):
         #     perturbed_cell_feats = self.__add_gaussian_noise(batch.batch_cell_feats)
         #     augmented_node_embeddings[i], augmented_hyperedge_embeddings[i], _ = self.encoder(batch._replace(batch_cell_feats=perturbed_cell_feats))
 
-        return node_embeddings, hyperedge_embeddings, reconstruction
+        return node_embeddings, hyperedge_embeddings, reconstruction, hyperedge_reconstruction
         # return node_embeddings, hyperedge_embeddings, augmented_node_embeddings, augmented_hyperedge_embeddings, reconstruction
     

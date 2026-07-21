@@ -11,7 +11,7 @@ class STHypergraphMatrixDataset(STHypergraphDataset):
                  hypergraph: STHypergraphData):
         super(STHypergraphMatrixDataset, self).__init__(hypergraph)
 
-        self.incidence_matrix = hypergraph['incidence_matrix'].to(torch.bool)
+        self.incidence_matrix = hypergraph['incidence_matrix']
 
         # optimization notes:
         # 1. getting neighboring hyperedges is faster if you have the edge_index (get 2-hop neighbors)
@@ -38,13 +38,13 @@ class STHypergraphMatrixDataset(STHypergraphDataset):
 
         # 3. Get all one-hop Hyperedges. These are hyperedges adjacent to initial nodes.
         # Required data for commanality computation of initial nodes
-        one_hop_hyperedges = (self.incidence_matrix[selected_cells] & ~selected_hyperedges).any(dim=0)
+        one_hop_hyperedges = (self.incidence_matrix[selected_cells].bool() & ~selected_hyperedges).any(dim=0)
         one_hop_hyperedge_ids = one_hop_hyperedges.nonzero(as_tuple=True)[0]
         # selected_hyperedges[one_hop_hyperedge_ids] = True        
         
         # 4. Get all nodes adjacent to initial hyperedges.
         # Required data for commonality computation of initial hyperedges
-        initial_hyperedge_cells = (self.incidence_matrix[:,selected_hyperedges] & (~selected_cells)[:, None]).any(dim=1)
+        initial_hyperedge_cells = (self.incidence_matrix[:,selected_hyperedges].bool() & (~selected_cells)[:, None]).any(dim=1)
         initial_hyperedge_cell_ids = initial_hyperedge_cells.nonzero(as_tuple=True)[0]
         selected_cells[initial_hyperedge_cell_ids] = True        
 
@@ -66,7 +66,7 @@ class STHypergraphMatrixDataset(STHypergraphDataset):
         # neighboring_cell_ids = one_hop_cells[0]
         # selected_cells[neighboring_cell_ids] = True
         # # print(cell_ids, neighbor_cell_ids)
-        one_hop_cells = (self.incidence_matrix[:, selected_hyperedges] & (~selected_cells)[:, None]).any(dim=1)
+        one_hop_cells = (self.incidence_matrix[:, selected_hyperedges].bool() & (~selected_cells)[:, None]).any(dim=1)
         one_hop_cell_ids = one_hop_cells.nonzero(as_tuple=True)[0]
         selected_cells[one_hop_cell_ids] = True
         
@@ -76,7 +76,7 @@ class STHypergraphMatrixDataset(STHypergraphDataset):
         # two_hop_hyperedges = torch.nonzero(self.incidence_matrix.bool() & (selected_cells[:, None] & ~selected_hyperedges[None, :]), as_tuple=True)
         # neighboring_cell_hyperedge_ids = two_hop_hyperedges[1]
         # selected_hyperedges[neighboring_cell_hyperedge_ids] = True
-        two_hop_hyperedges = (self.incidence_matrix[selected_cells] & ~selected_hyperedges).any(dim=0)
+        two_hop_hyperedges = (self.incidence_matrix[selected_cells].bool() & ~selected_hyperedges).any(dim=0)
         two_hop_hyperedge_ids = two_hop_hyperedges.nonzero(as_tuple=True)[0]
         selected_hyperedges[two_hop_hyperedge_ids] = True
 
@@ -106,8 +106,8 @@ class STHypergraphMatrixDataset(STHypergraphDataset):
         batch_hyperedge_feats = self.hyperedge_feats[batch_subgraph_hyperedges]
         batch_cell_types = self.cell_types[batch_subgraph_cells]
         
-        batch_incidence_matrix = self.incidence_matrix[batch_subgraph_cells][:, batch_subgraph_hyperedges].to(torch.float)
-        neighborhood_incidence_matrix = self.incidence_matrix[batch_subgraph_cells[:neighborhood_n_cells]][:, batch_subgraph_hyperedges[:neighborhood_n_hyperedges]].to(torch.float)
+        batch_incidence_matrix = self.incidence_matrix[batch_subgraph_cells][:, batch_subgraph_hyperedges]
+        neighborhood_incidence_matrix = self.incidence_matrix[batch_subgraph_cells[:neighborhood_n_cells]][:, batch_subgraph_hyperedges[:neighborhood_n_hyperedges]]
 
         # TODO move remap on model
         # remapped_cells = hyperedge_index[0].unique(return_inverse=True)[1]

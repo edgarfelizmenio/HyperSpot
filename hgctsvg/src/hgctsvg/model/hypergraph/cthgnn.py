@@ -7,19 +7,17 @@ from . import HypergraphEmbedder, HypergraphEmbedderArgs
 from ..moduledict import LinearDict, LinearDictLora, ParameterDict
 
 class CTHyFiHGNNv1(nn.Module):
-    def __init__(self, 
-                 input_dim, 
-                 embedding_dim, 
+    def __init__(self,
+                 n_cell_types,
+                 input_dim,
+                 embedding_dim,
                  dropout = 0.1,
                  act=nn.PReLU):
         super(CTHyFiHGNNv1, self).__init__()
-        # perform node-edge-node feature transform
-
-        # TODO parametrize num cell types
-        self.hyperedge_emb_weight = LinearDict(12, input_dim, embedding_dim, bias=False)
+        self.hyperedge_emb_weight = LinearDict(n_cell_types, input_dim, embedding_dim, bias=False)
         self.hyperedge_emb_bias = nn.Parameter(torch.zeros((embedding_dim,)))
         self.node_emb_weight = nn.Linear(embedding_dim, embedding_dim, bias=False)
-        self.node_emb_bias = ParameterDict(12, embedding_dim)
+        self.node_emb_bias = ParameterDict(n_cell_types, embedding_dim)
         self.dropout = nn.Dropout(dropout)
         self.act = act()
 
@@ -42,7 +40,7 @@ class CTHyFiHGNNv1(nn.Module):
         de_inv = (de**-1).diag()
         de_inv[de_inv == float('inf')] = 0
 
-        node_feats = self.dropout(node_feats)
+        # node_feats = self.dropout(node_feats)
 
         hyperedge_embeddings = de_inv @ incidence_matrix.t() @ dv_invsqrt @ self.hyperedge_emb_weight(node_feats, cell_types) + self.hyperedge_emb_bias
         # hyperedge_embeddings_norm = self.hyperedge_emb_norm(hyperedge_embeddings)
@@ -58,11 +56,12 @@ class CTHyFiHGNNv1(nn.Module):
 class CTHyFiEmbedder(HypergraphEmbedder):
 
     @classmethod
-    def _build_impl(cls, args: HypergraphEmbedderArgs):
+    def _build_impl(cls, args: HypergraphEmbedderArgs, n_cell_types: int):
         model = CTHyFiHGNNv1(
+            n_cell_types,
             args.input_dim,
             args.embedding_dim,
-            args.dropout
+            args.dropout,
         )
         return cls(model)
 
