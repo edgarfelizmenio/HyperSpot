@@ -26,7 +26,7 @@ HyperSpot: Detection of Cell Type-Specific Spatially Variable Gene Modules using
 ## Installation
 
 ### Production Mode
-Install hgctsvg package using pip:
+Install HyperSpot package using pip:
   ```bash
   pip install hyperspot
   ```
