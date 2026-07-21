@@ -1,9 +1,9 @@
 [project]
-name = "hgctsvg"
+name = "hyperspot"
 version = "0.1.0"
 
 [project.scripts]
-hgctsvg = "hgctsvg.cli:app"
+hgctsvg = "hyperspot.cli:app"
 
 [project.entry-points."pipx.run"]
-hgctsvg = "hgctsvg.cli:app"
+hgctsvg = "hyperspot.cli:app"

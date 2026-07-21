@@ -3,7 +3,7 @@ from .embedder import (
     HypergraphEmbedderArgs,
 )
 
-from .clustering import HGCTSVGClustering
+from .clustering import HyperSpotClustering
 
 from .classification import SCEmbeddingSpatialClassifierDriver
 

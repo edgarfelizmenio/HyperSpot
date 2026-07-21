@@ -30,14 +30,14 @@ from .metadata import ProjectMetadata
 from .pipeline import (
     HypergraphEmbedderDriver, 
     HypergraphEmbedderArgs, 
-    HGCTSVGClustering, 
+    HyperSpotClustering, 
     SCEmbeddingSpatialClassifierDriver, 
     Explainer, 
     ExplainerArgs,
     run_eval,
 )
 
-app = App(name="hgctsvg")
+app = App(name="hyperspot")
 
 @Parameter(name="*")
 @dataclass
@@ -174,7 +174,7 @@ def compute_spatial_domains(project: ProjectArgs,
 
     ProjectMetadata(project.project_dir)
 
-    clustering_driver = HGCTSVGClustering()
+    clustering_driver = HyperSpotClustering()
     clustering_driver.create_aggr_st_data(var_cols=copy_var_cols)
     clustering_driver.load_embedding_to_aggr_data(clustering.embedding_key)
     clustering_driver.compute_spatial_clusters(**vars(clustering))
@@ -186,7 +186,7 @@ def compute_celltype_spatial_domains(project: ProjectArgs,
 
     ProjectMetadata(project.project_dir)
     
-    clustering_driver = HGCTSVGClustering()
+    clustering_driver = HyperSpotClustering()
     clustering_driver.load_embedding_to_ct_spatial_data(clustering.embedding_key)
     clustering_driver.compute_ct_spatial_clusters(**vars(clustering))
 

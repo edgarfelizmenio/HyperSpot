@@ -11,7 +11,7 @@ from pathlib import Path
 from .. import config
 from ..data import STHypergraphData
 
-from ..pipeline import HypergraphEmbedderDriver, HypergraphEmbedderArgs, HGCTSVGClustering, SCEmbeddingSpatialClassifierDriver, Explainer, ExplainerArgs
+from ..pipeline import HypergraphEmbedderDriver, HypergraphEmbedderArgs, HyperSpotClustering, SCEmbeddingSpatialClassifierDriver, Explainer, ExplainerArgs
 
 @Parameter(name="*")
 @dataclass
@@ -133,7 +133,7 @@ def compute_spatial_domains(project: ProjectArgs,
     spot_embeddings = torch.load(project.project_dir / "hyperedge_embeddings.pth")
     adata_st.obsm[embedding_key] = spot_embeddings.numpy()
 
-    clustering = HGCTSVGClustering(project.project_dir)
+    clustering = HyperSpotClustering(project.project_dir)
     clustering.compute_spatial_clusters(adata_st, 
                                         embedding_key, 
                                         clustering_args.resolution)
@@ -148,7 +148,7 @@ def compute_celltype_spatial_domains(project: ProjectArgs,
  
     adata_decomp.obsm[data.embedding_key] = embedding.numpy()
     
-    clustering = HGCTSVGClustering(project.project_dir)
+    clustering = HyperSpotClustering(project.project_dir)
     clustering.compute_celltype_specific_spatial_clusters(adata_decomp, 
                                                   type_list,
                                                   data.cell_type_key,

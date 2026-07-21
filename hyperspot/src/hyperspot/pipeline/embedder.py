@@ -23,7 +23,7 @@ from ..metadata import ProjectMetadata
 
 from ..model.hypergraph import HypergraphEmbedder, HypergraphEmbedderArgs
 from ..model.cl.hyfi import HyFi, HyFiAE
-from ..model.cl.hgctsvgloss import HGCTCAELoss
+from ..model.cl.hyperspotloss import HGCTCAELoss
 
 from ..utils import build_incidence_matrix
 

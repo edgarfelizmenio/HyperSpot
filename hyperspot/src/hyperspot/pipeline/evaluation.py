@@ -20,13 +20,13 @@ from ..utils import (
 
 from . import (
     HypergraphEmbedderDriver,
-    HGCTSVGClustering,
+    HyperSpotClustering,
     compute_domain_svgs,
     compute_domain_ct_svgs,
     create_svg_list,
 )
 
-def HGCTSVG_eval_pipeline(
+def HyperSpot_eval_pipeline(
     run_number: int,
     args: HypergraphEmbedderArgs,
     num_epochs,
@@ -58,7 +58,7 @@ def HGCTSVG_eval_pipeline(
                                 batch_size,
                                 accelerator)
 
-    clustering_driver = HGCTSVGClustering()
+    clustering_driver = HyperSpotClustering()
 
     # clustering tissue domains
     clustering_driver.create_aggr_st_data(var_cols=copy_var_cols)
@@ -139,7 +139,7 @@ def run_eval(
 
     for run_number in range(start, n):
         seed = EVAL_SEEDS[run_number]
-        HGCTSVG_eval_pipeline(
+        HyperSpot_eval_pipeline(
             run_number,
             args,
             num_epochs,
@@ -179,7 +179,7 @@ class ClusterEvaluation(object):
         }
 
     def _compute_metrics_embedding(self, adata, clusters):
-        """HGCTSVG: home eval in embedding space; cross-eval: same expression PCA as baseline."""
+        """HyperSpot: home eval in embedding space; cross-eval: same expression PCA as baseline."""
         y_pred = clusters['domain'].to_numpy()
         E = adata.obsm.get('embedding')
         S = adata.obsm.get('spatial')
@@ -188,7 +188,7 @@ class ClusterEvaluation(object):
         X_pca = self._expr_pca(adata)
         return {
             'silhouette_emb':     self._sil(E, y_pred),
-            'silhouette_expr':    self._sil(X_pca, y_pred),   # cross-eval: HGCTSVG clusters in expression PCA
+            'silhouette_expr':    self._sil(X_pca, y_pred),   # cross-eval: HyperSpot clusters in expression PCA
             'silhouette_spatial': self._sil(S, y_pred) if S is not None else float('nan'),
         }
 

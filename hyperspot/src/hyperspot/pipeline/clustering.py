@@ -21,7 +21,7 @@ from ..utils import (
     save_aggr_st_data
 )
 
-class HGCTSVGClustering(object):
+class HyperSpotClustering(object):
     def __init__(self):
         pass
         

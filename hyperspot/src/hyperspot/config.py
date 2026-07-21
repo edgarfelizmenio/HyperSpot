@@ -21,7 +21,7 @@ config_path = Path(__file__).parent / 'settings.ini'
 
 config_files = [
     config_path,
-    'hgctsvg_custom_settings.ini'
+    'hyperspot_custom_settings.ini'
 ]
 
 app_config = configparser.ConfigParser()
