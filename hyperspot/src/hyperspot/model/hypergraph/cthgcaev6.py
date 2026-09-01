@@ -208,7 +208,7 @@ class CTHGEncoder(nn.Module):
             seq = torch.stack([un, mn], dim=1)          # (N, 2, D)
             seq = seq + self.mha(seq, seq, seq, need_weights=False)[0]
             z = seq.mean(dim=1)                         # (N, D)
-        return z, h
+        return z, h, un
 
 
 class CTHGDecoder(nn.Module):
@@ -274,11 +274,13 @@ class CTHGCAEv6(nn.Module):
                                    hyperedge_feat_dim, dropout=dropout)
 
     def forward(self, node_feats, cell_types, incidence_matrix):
-        z, h = self.encoder(node_feats, cell_types, incidence_matrix)
+        z, h, un = self.encoder(node_feats, cell_types, incidence_matrix)
         node_reconstruction, hyperedge_reconstruction = self.decoder(
             z, cell_types, incidence_matrix
         )
-        return z, h, node_reconstruction, hyperedge_reconstruction
+        # un (post-norm neighborhood branch) appended at index 4 so indices 0-3
+        # (z, h, node_recon, he_recon) stay stable for all positional consumers.
+        return z, h, node_reconstruction, hyperedge_reconstruction, un
 
 
 @HypergraphEmbedder.register("CTHGCAEv6Embedder")

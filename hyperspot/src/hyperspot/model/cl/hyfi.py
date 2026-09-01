@@ -279,7 +279,10 @@ class HyFiAE(nn.Module):
         # forward on original data. Models with the opt-in hyperedge decoder
         # return a 4th value (hyperedge reconstruction); others return 3.
         out = self.encoder(batch)
-        if len(out) == 4:
+        if len(out) == 5:
+            # models exposing the neighborhood branch (un) at index 4; unused for training
+            node_embeddings, hyperedge_embeddings, reconstruction, hyperedge_reconstruction, _ = out
+        elif len(out) == 4:
             node_embeddings, hyperedge_embeddings, reconstruction, hyperedge_reconstruction = out
         else:
             node_embeddings, hyperedge_embeddings, reconstruction = out

@@ -251,15 +251,18 @@ class HypergraphEmbedderDriver(object):
             return contrastive_loss, node_total, hyperedge_total
         
         else:
-            out = self.model(batch)   # 3- or 4-tuple depending on the model
+            out = self.model(batch)   # 3-, 4-, or 5-tuple depending on the model
 
-            return out[0], out[1]      # node_embeddings, hyperedge_embeddings
+            un = out[4] if len(out) >= 5 else None
+            return out[0], out[1], un  # node_embeddings, hyperedge_embeddings, neighborhood (un)
         
     def generate_embedding(self,
                            hypergraph: STHypergraphData,
                            embedder_args: HypergraphEmbedderArgs,
                            batch_size: int,
-                           accelerator: AcceleratorOptions):
+                           accelerator: AcceleratorOptions,
+                           K: float = 0.7,
+                           M: float = 0.7):
 
         project_metadata = ProjectMetadata()
         
@@ -267,8 +270,8 @@ class HypergraphEmbedderDriver(object):
         self.model.load_checkpoint()
         self.cl_model.eval()
         
-        hgdataset = STHypergraphMatrixDataset(hypergraph)
-        
+        hgdataset = STHypergraphMatrixDataset(hypergraph, K=K, M=M)
+
         hgtestsampler = BatchSampler(
             SequentialSampler(hgdataset),
             batch_size=batch_size,
@@ -278,16 +281,19 @@ class HypergraphEmbedderDriver(object):
         hgloader = DataLoader(hgdataset, sampler=hgtestsampler, batch_size=None)
         node_embedding_batches = []
         hyperedge_embedding_batches = []
+        neighborhood_embedding_batches = []
         node_id_batches = []
         hyperedge_id_batches = []
         for batch in tqdm(hgloader, leave=False, disable=True):
             n_cells = batch.sample_n_cells
             n_hyperedges = batch.sample_n_hyperedges
-            
-            node_embedding_batch, hyperedge_embedding_batch = self.__step_batch(batch)
+
+            node_embedding_batch, hyperedge_embedding_batch, neighborhood_embedding_batch = self.__step_batch(batch)
             node_embedding_batches.append(node_embedding_batch[:n_cells].detach().cpu())
             hyperedge_embedding_batches.append(hyperedge_embedding_batch[:n_hyperedges].detach().cpu())
-            
+            if neighborhood_embedding_batch is not None:
+                neighborhood_embedding_batches.append(neighborhood_embedding_batch[:n_cells].detach().cpu())
+
             node_id_batches.append(batch.batch_subgraph_cells[:n_cells].detach().cpu())
             hyperedge_id_batches.append(batch.batch_subgraph_hyperedges[:n_hyperedges].detach().cpu())
 
@@ -312,6 +318,13 @@ class HypergraphEmbedderDriver(object):
         print(node_embeddings.shape, hyperedge_embeddings.shape)
         torch.save(node_embeddings, project_metadata.project_folder / "node_embeddings.pth")
         torch.save(hyperedge_embeddings, project_metadata.project_folder / "hyperedge_embeddings.pth")
+
+        # neighborhood (post-norm un) branch of the fused node embedding: per cell,
+        # aligned row-for-row with node_embeddings (same node_order). Only models that
+        # expose un (index 4) populate this; others skip the file.
+        if neighborhood_embedding_batches:
+            neighborhood_embeddings = torch.cat(neighborhood_embedding_batches, dim=0)[node_order]
+            torch.save(neighborhood_embeddings, project_metadata.project_folder / "neighborhood_embeddings.pth")
 
     def __reduce_hyperedge_embeddings(self, hyperedge_embeddings, hyperedge_ids, n_hyperedges):
         hyperedge_ids = hyperedge_ids.squeeze().long()

@@ -143,17 +143,20 @@ def train_embedder(project: ProjectArgs,
              sort_key=3)
 def make_embedding(project: ProjectArgs,
                    model: EmbedderCLIArgs,
-                   trainer: TrainerArgs):
+                   trainer: TrainerArgs,
+                   K: Annotated[float, Parameter(help="Fraction of neighborhood hyperedges kept per hop at inference (fan-out cap, avoids OOM). 1.0 = full neighborhood (deterministic, reproduces training-time embeddings).")] = 0.7,
+                   M: Annotated[float, Parameter(help="Fraction of neighborhood cells kept per hyperedge expansion at inference (fan-out cap, avoids OOM). 1.0 = full neighborhood.")] = 0.7):
 
     ProjectMetadata(project.project_dir)
-    
+
     hypergraph = STHypergraphData.load()
     embedder = HypergraphEmbedderDriver()
 
     embedder.generate_embedding(hypergraph,
                                 HypergraphEmbedderArgs(**vars(model)),
                                 trainer.batch_size,
-                                trainer.accelerator)
+                                trainer.accelerator,
+                                K=K, M=M)
 
 @app.command(help="Using hyperedge embeddings, find the spatial domains present in the Spatial Transcriptomics tissue.",
              sort_key=4)
