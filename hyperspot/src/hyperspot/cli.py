@@ -28,10 +28,13 @@ from .dataset.hypergraph import STHypergraphListDataset
 from .metadata import ProjectMetadata
 
 from .pipeline import (
-    HypergraphEmbedderDriver, 
-    HypergraphEmbedderArgs, 
-    HyperSpotClustering, 
+    HypergraphEmbedderDriver,
+    HypergraphEmbedderArgs,
+    HyperSpotClustering,
     run_eval,
+    compute_domain_svgs,
+    compute_domain_ct_svgs,
+    create_svg_list,
 )
 
 app = App(name="hyperspot")
@@ -74,7 +77,7 @@ class RegularizerArgs:
     temp_nbr: Annotated[float, Parameter(help="Temperature for the neighborhood contrastive regularizer.")] = 0.5
     edge_preserving: Annotated[bool, Parameter(help="Expression-gated (bilateral) neighborhood pull: smooths within regions but not across expression boundaries. Set False for the isotropic-blur ablation.")] = True
     reg_weight: Annotated[float, Parameter(help="Weight for the model-side regularizer (e.g. v4 gate L1).")] = 0.0
-    optimize_hyperedges: Annotated[bool, Parameter(help="Enable the hyperedge autoencoder branch (reconstruct each spot's own pseudobulk + regularize hyperedge embeddings). Requires a hypergraph built with n_hyperedge_feats>0.")] = False
+    optimize_hyperedges: Annotated[bool, Parameter(help="Enable the hyperedge autoencoder branch (reconstruct each spot's own pseudobulk + regularize hyperedge embeddings). Requires a hypergraph built with n_hyperedge_feats>0.")] = True
     rho_h: Annotated[float, Parameter(help="Hyperedge reconstruction weight (only used when optimize_hyperedges).")] = 1.0
     lambda_var_h: Annotated[float, Parameter(help="Variance (anti-collapse) weight on hyperedge embeddings.")] = 0.0
     lambda_cov_h: Annotated[float, Parameter(help="Covariance (decorrelation) weight on hyperedge embeddings.")] = 0.0
@@ -85,8 +88,9 @@ class ClusterArgs:
     # minimum number of samples in a cluster as a percentage of the total number of samples.
     embedding_key: str = "embedding"
     algorithm: Literal["leiden", "agglomerative", "gmm"] = "leiden"
-    min_cluster_pct: float = 0.05   # fractional size floor: domain must be >= this fraction of cells
+    min_cluster_pct: float = -1     # fractional size floor OFF by default (dedup fixes the over-clustering it patched); absolute size floor below still applies
     min_cluster_size: int = 3       # absolute size floor: domain must have >= this many cells (< 3 is statistically insignificant)
+    dedup_spots: bool = True        # collapse same-spot same-CT duplicate cells before clustering (Spotiphy); guarded -> auto no-op on real per-cell variation. Set False for true-counts / per-cell data.
     seed: int = 42
     n_pca_components: int = 50
     n_clusters: int = 20          # agglomerative: over-segment before min_cluster_pct merge
@@ -170,10 +174,54 @@ def compute_celltype_spatial_domains(project: ProjectArgs,
                                      clustering: ClusterArgs = ClusterArgs()):
 
     ProjectMetadata(project.project_dir)
-    
+
     clustering_driver = HyperSpotClustering()
     clustering_driver.load_embedding_to_ct_spatial_data(clustering.embedding_key)
     clustering_driver.compute_ct_spatial_clusters(**vars(clustering))
+
+@app.command(help="Detect tissue-level spatially variable genes (SVGs) for the ST spatial domains -> svgs_ST.csv. Requires spatial domains first (compute-spatial-domains).",
+             sort_key=8)
+def compute_svgs(
+    project: ProjectArgs,
+    key: Annotated[str, Parameter(help="obs column holding the domain labels.")] = 'domain',
+    min_pts: Annotated[float, Parameter(help="Keep genes expressed in >= this fraction of the domain.")] = 0.8,
+    min_logfc: Annotated[float, Parameter(help="Keep genes with >= this log fold-change vs the rest.")] = 1.5,
+    rank_by: Annotated[str, Parameter(help="Ranking statistic for the SVG list.")] = 'scores',
+    dedup_spots: Annotated[bool, Parameter(help="Collapse same-spot duplicate cells before the test (Spotiphy).")] = True,
+    output_dir: Annotated[Optional[str], Parameter(help="Directory for the SVG CSV (default <project>/svgs).")] = None,
+):
+    ProjectMetadata(project.project_dir)
+    out = Path(output_dir) if output_dir else ProjectMetadata().project_folder / "svgs"
+    out.mkdir(parents=True, exist_ok=True)
+
+    svgs = compute_domain_svgs(key=key, min_pts=min_pts, min_logfc=min_logfc,
+                               rank_by=rank_by, dedup_spots=dedup_spots)
+    create_svg_list(svgs, rank_by=rank_by).to_csv(out / "svgs_ST.csv")
+    print(f"SVGs -> {out / 'svgs_ST.csv'}")
+
+@app.command(help="Detect cell-type-specific SVGs (ctSVGs): domain-marker genes per cell type -> svgs_ct_<ct>.csv. Default: all cell types; --cell-types limits to a subset. Requires per-CT domains first (compute-celltype-spatial-domains).",
+             sort_key=9)
+def compute_ct_svgs(
+    project: ProjectArgs,
+    cell_types: Annotated[Optional[List[str]], Parameter(help="Restrict ctSVG detection to these cell types (default: all).")] = None,
+    key: Annotated[str, Parameter(help="obs column holding the domain labels.")] = 'domain',
+    min_pts: Annotated[float, Parameter(help="Keep genes expressed in >= this fraction of the domain.")] = 0.8,
+    min_logfc: Annotated[float, Parameter(help="Keep genes with >= this log fold-change vs the rest.")] = 1.5,
+    rank_by: Annotated[str, Parameter(help="Ranking statistic for the SVG list.")] = 'scores',
+    dedup_spots: Annotated[bool, Parameter(help="Collapse same-spot duplicate cells before the test (Spotiphy).")] = True,
+    output_dir: Annotated[Optional[str], Parameter(help="Directory for the ctSVG CSVs (default <project>/svgs).")] = None,
+):
+    ProjectMetadata(project.project_dir)
+    pm = ProjectMetadata()
+    out = Path(output_dir) if output_dir else pm.project_folder / "svgs"
+    out.mkdir(parents=True, exist_ok=True)
+
+    types = cell_types if cell_types else pm.ct_list
+    for ct in types:
+        ct_svgs = compute_domain_ct_svgs(ct, key=key, min_pts=min_pts, min_logfc=min_logfc,
+                                         rank_by=rank_by, dedup_spots=dedup_spots)
+        create_svg_list(ct_svgs, rank_by=rank_by).to_csv(out / f"svgs_ct_{ct}.csv")
+        print(f"ctSVGs [{ct}] -> {out / ('svgs_ct_' + ct + '.csv')}")
 
 @app.command(help="Run evaluation test.", sort_key=6)
 def perform_model_evaluation(
@@ -181,6 +229,7 @@ def perform_model_evaluation(
     model: EmbedderCLIArgs,
     trainer: TrainerArgs,
     clustering: ClusterArgs = ClusterArgs(),
+    regularizer: RegularizerArgs = RegularizerArgs(),
     num_runs: int = 10,
     ):
 
@@ -196,6 +245,7 @@ def perform_model_evaluation(
         min_cluster_pct=clustering.min_cluster_pct,
         n_pca_components=clustering.n_pca_components,
         n=num_runs,
+        reg_kwargs=vars(regularizer),
     )
 
 @app.command(help="Check if project folder exists.",

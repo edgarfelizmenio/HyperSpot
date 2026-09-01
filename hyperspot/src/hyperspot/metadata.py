@@ -30,6 +30,20 @@ class ProjectMetadata:
             self.project_folder = Path(project_folder)
             self._load_if_needed()
 
+    @classmethod
+    def use(cls, project_folder):
+        """Switch the active project.
+
+        The metadata is Borg (process-wide `_shared_state`) and `__init__` only loads a
+        project the first time — a later `ProjectMetadata(other)` is silently ignored, so
+        the active project is sticky. Notebooks that analyze several projects in one kernel
+        (e.g. tumor core vs interface) must call this to actually switch: it clears the
+        shared state and reloads from disk. Returns the freshly bound instance.
+        """
+        with cls._lock:
+            cls._shared_state.clear()
+        return cls(project_folder)
+
     @property
     def dir_map(self):
         return self._SUBDIRS.copy()

@@ -102,3 +102,6 @@ from .cthgcaev4 import CTHGCAEv4Embedder
 from .cthgcaev5 import CTHGCAEv5Embedder
 from .cthgcaev6 import CTHGCAEv6Embedder
 from .cthgcaev7 import CTHGCAEv7Embedder
+from .cthgat import CTHGATEmbedder
+from .cthgatv2 import CTGATv2Embedder
+from .cthgconv import CTHGConvEmbedder

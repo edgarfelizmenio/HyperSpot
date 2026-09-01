@@ -38,7 +38,7 @@ def plot_all_ct_decomposition(n_cols = 4, figsize: tuple = (4, 4), cell_color="l
         else:
             fig.delaxes(ax)
 
-    plt.tight_layout()
+    plt.gcf().set_layout_engine("tight")
     plt.show()
 
 def plot_all_ct_domains(n_cols = 4, figsize: tuple = (20, 15)):
@@ -73,7 +73,7 @@ def plot_all_ct_domains(n_cols = 4, figsize: tuple = (20, 15)):
         else:
             fig.delaxes(ax)
     
-    plt.tight_layout()
+    plt.gcf().set_layout_engine("tight")
     plt.show()
 
 def plot_ct_decomposition(type_list: list = None,
@@ -110,7 +110,7 @@ def plot_ct_decomposition(type_list: list = None,
         if not show_title:
             ax.set_title(None)
 
-        plt.tight_layout()
+        plt.gcf().set_layout_engine("tight")
             
         if save:
             save_dir = project_metadata.plot_dir / 'distribution'
@@ -150,9 +150,12 @@ def plot_ct_domains(type_list: list = None,
         
         if not show_title:
             ax.set_title(None)
-        
-        plt.tight_layout()
-    
+
+        # squidpy's spatial_scatter creates the figure with constrained_layout;
+        # set the tight engine via the modern API instead of plt.tight_layout(),
+        # which warns when it overrides an existing layout engine.
+        ax.figure.set_layout_engine("tight")
+
         if save:
             save_dir = project_metadata.plot_dir / 'domains'
             save_dir.mkdir(parents=True, exist_ok=True)

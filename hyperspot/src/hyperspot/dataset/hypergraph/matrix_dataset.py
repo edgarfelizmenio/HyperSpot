@@ -1,3 +1,4 @@
+import math
 import torch
 
 from typing import List
@@ -8,14 +9,36 @@ from ...data import STHypergraphData
 
 class STHypergraphMatrixDataset(STHypergraphDataset):
     def __init__(self,
-                 hypergraph: STHypergraphData):
+                 hypergraph: STHypergraphData,
+                 K: float = 0.7,
+                 M: float = 0.7):
         super(STHypergraphMatrixDataset, self).__init__(hypergraph)
 
         self.incidence_matrix = hypergraph['incidence_matrix']
 
+        # Neighborhood-sampling ratios (GraphSAGE-style fan-out control), applied
+        # per expansion hop so a minibatch stays bounded instead of inducing the
+        # full 2-hop subgraph. Seed cells and their home hyperedges (the loss
+        # targets) are never sampled; only the context hops are subsampled.
+        #   K -- fraction of neighborhood hyperedges kept per hop
+        #   M -- fraction of neighborhood cells kept per hyperedge expansion
+        # 1.0 keeps everything (original behavior).
+        self.K = K
+        self.M = M
+
         # optimization notes:
         # 1. getting neighboring hyperedges is faster if you have the edge_index (get 2-hop neighbors)
-    
+
+    def _sample(self, ids: torch.Tensor, ratio: float) -> torch.Tensor:
+        """Randomly keep ceil(ratio * len) of a 1-D index tensor (no-op at ratio >= 1)."""
+        n = ids.numel()
+        if ratio >= 1.0 or n == 0:
+            return ids
+        k = max(1, math.ceil(ratio * n))
+        if k >= n:
+            return ids
+        return ids[torch.randperm(n)[:k]]
+
     def __len__(self):
         return self.cell_feats.shape[0]
         
@@ -40,13 +63,15 @@ class STHypergraphMatrixDataset(STHypergraphDataset):
         # Required data for commanality computation of initial nodes
         one_hop_hyperedges = (self.incidence_matrix[selected_cells].bool() & ~selected_hyperedges).any(dim=0)
         one_hop_hyperedge_ids = one_hop_hyperedges.nonzero(as_tuple=True)[0]
-        # selected_hyperedges[one_hop_hyperedge_ids] = True        
+        one_hop_hyperedge_ids = self._sample(one_hop_hyperedge_ids, self.K)   # fan-out cap
+        # selected_hyperedges[one_hop_hyperedge_ids] = True
         
         # 4. Get all nodes adjacent to initial hyperedges.
         # Required data for commonality computation of initial hyperedges
         initial_hyperedge_cells = (self.incidence_matrix[:,selected_hyperedges].bool() & (~selected_cells)[:, None]).any(dim=1)
         initial_hyperedge_cell_ids = initial_hyperedge_cells.nonzero(as_tuple=True)[0]
-        selected_cells[initial_hyperedge_cell_ids] = True        
+        initial_hyperedge_cell_ids = self._sample(initial_hyperedge_cell_ids, self.M)   # fan-out cap
+        selected_cells[initial_hyperedge_cell_ids] = True
 
         # only update this here, after nodes of initial hyperedges have been identified
         selected_hyperedges[one_hop_hyperedge_ids] = True        
@@ -68,6 +93,7 @@ class STHypergraphMatrixDataset(STHypergraphDataset):
         # # print(cell_ids, neighbor_cell_ids)
         one_hop_cells = (self.incidence_matrix[:, selected_hyperedges].bool() & (~selected_cells)[:, None]).any(dim=1)
         one_hop_cell_ids = one_hop_cells.nonzero(as_tuple=True)[0]
+        one_hop_cell_ids = self._sample(one_hop_cell_ids, self.M)   # fan-out cap
         selected_cells[one_hop_cell_ids] = True
         
         # # 7. Get neighbor incident hyperedges
@@ -78,6 +104,7 @@ class STHypergraphMatrixDataset(STHypergraphDataset):
         # selected_hyperedges[neighboring_cell_hyperedge_ids] = True
         two_hop_hyperedges = (self.incidence_matrix[selected_cells].bool() & ~selected_hyperedges).any(dim=0)
         two_hop_hyperedge_ids = two_hop_hyperedges.nonzero(as_tuple=True)[0]
+        two_hop_hyperedge_ids = self._sample(two_hop_hyperedge_ids, self.K)   # fan-out cap
         selected_hyperedges[two_hop_hyperedge_ids] = True
 
         # get the induced subgraph using the selected cells and hyperedges

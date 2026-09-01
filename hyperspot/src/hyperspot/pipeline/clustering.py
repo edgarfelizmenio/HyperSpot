@@ -18,7 +18,8 @@ from ..utils import (
     load_ct_spatial_data,
     save_ct_spatial_data,
     load_aggr_st_data,
-    save_aggr_st_data
+    save_aggr_st_data,
+    guarded_spot_reps,
 )
 
 class HyperSpotClustering(object):
@@ -36,6 +37,7 @@ class HyperSpotClustering(object):
         n_pca_components: int = 50,
         n_clusters: int = 20,
         n_neighbors: int = 15,
+        dedup_spots: bool = True,    # same-spot same-CT cells are exact duplicates: cluster unique spots, broadcast
         min_cluster_size: int = 3,
         select_pcs: bool = False,
         pc_var_floor: float = 0.04,
@@ -50,29 +52,40 @@ class HyperSpotClustering(object):
         # unallocation!" errors. Scoped to the BLAS API only.
         with threadpool_limits(limits=16, user_api="blas"):
             cluster_key = embedding_key
-            n_comps = min(n_pca_components, adata.obsm[embedding_key].shape[1] - 1, adata.n_obs - 1)
-            if n_comps > 0:
+            dim = adata.obsm[embedding_key].shape[1]
+            n_comps = min(n_pca_components, dim - 1, adata.n_obs - 1)
+            # PCA only helps when it actually reduces dimensionality. A learned
+            # embedding already within the clustering algorithms' comfortable range
+            # (dim <= n_pca_components) is clustered as-is: PCA on it would be a
+            # near-identity rotation (distance-preserving) with no benefit, and for
+            # dim <= n_pca_components there is no low-variance tail worth truncating.
+            n_select = dim
+            if dim > n_pca_components and n_comps > 0:
                 pca_key = embedding_key + "_pca"
                 adata.obsm[pca_key] = PCA(n_components=n_comps, random_state=seed).fit_transform(adata.obsm[embedding_key])
                 cluster_key = pca_key
+                n_select = n_comps
+            else:
+                print(f"  pca: embedding dim {dim} <= n_pca_components {n_pca_components}; clustering on embedding as-is")
 
-                # gated-select: keep only PCs with real discrete structure
-                # (significantly multimodal by Hartigan's dip test, above a variance
-                # floor), then cluster on those. Drops the continuous/noise PCs that
-                # otherwise drown the signal.
-                if select_pcs and adata.n_obs < select_min_cells:
-                    # too few cells to estimate modality reliably -> don't gate
-                    print(f"  select-pcs: {adata.n_obs} cells < {select_min_cells}; skipping gating (all PCs)")
-                elif select_pcs:
-                    keep = self.__select_multimodal_pcs(adata.obsm[pca_key], pc_var_floor, pc_dip_alpha)
-                    if keep:
-                        sub = adata.obsm[pca_key][:, keep]
-                        sel_key = pca_key + "_sel"
-                        adata.obsm[sel_key] = (sub - sub.mean(0)) / (sub.std(0) + 1e-8)  # z-score kept PCs
-                        cluster_key = sel_key
-                        print(f"  select-pcs: kept {len(keep)}/{n_comps} PCs {keep}")
-                    else:
-                        print("  select-pcs: no PC passed the dip+variance filter; using all PCs")
+            # gated-select: keep only dimensions with real discrete structure
+            # (significantly multimodal by Hartigan's dip test, above a variance
+            # floor), then cluster on those. Drops the continuous/noise dimensions
+            # that otherwise drown the signal. Operates on the active representation
+            # -- the PCs when PCA ran, else the embedding dimensions.
+            if select_pcs and adata.n_obs < select_min_cells:
+                # too few cells to estimate modality reliably -> don't gate
+                print(f"  select-pcs: {adata.n_obs} cells < {select_min_cells}; skipping gating (all dims)")
+            elif select_pcs:
+                keep = self.__select_multimodal_pcs(adata.obsm[cluster_key], pc_var_floor, pc_dip_alpha)
+                if keep:
+                    sub = adata.obsm[cluster_key][:, keep]
+                    sel_key = cluster_key + "_sel"
+                    adata.obsm[sel_key] = (sub - sub.mean(0)) / (sub.std(0) + 1e-8)  # z-score kept dims
+                    cluster_key = sel_key
+                    print(f"  select-pcs: kept {len(keep)}/{n_select} dims {keep}")
+                else:
+                    print("  select-pcs: no dim passed the dip+variance filter; using all dims")
 
             # size floor: a domain must clear BOTH the fractional min_cluster_pct
             # and an absolute min_cluster_size (# cells). The absolute floor stops
@@ -88,58 +101,88 @@ class HyperSpotClustering(object):
                     adata.obs["domain"] = pd.Categorical(["0"] * adata.n_obs)
                     return "domain"
 
-            if algorithm == "leiden":
-                for key in ['connectivities', 'distances']:
-                    if key in adata.obsp:
-                        del adata.obsp[key]
-                if 'neighbors' in adata.uns:
-                    del adata.uns['neighbors']
-                # scale k with spot occupancy. For high-population cell types many
-                # same-spot cells are near-identical (spot-pooled), so a small k
-                # fills up with same-spot neighbors and never reaches other spots,
-                # fragmenting the graph into per-spot components (resolution then
-                # can't merge them). k must exceed the same-spot cell count to make
-                # inter-spot edges.
-                n_neigh = n_neighbors
-                if 'spot_name' in adata.obs:
-                    occ = adata.obs['spot_name'].value_counts()
-                    n_neigh = int(min(adata.n_obs - 1, n_neighbors + occ.quantile(0.90)))
-                if use_gauss_neighbors:
-                    sc.pp.neighbors(adata, n_neighbors=n_neigh, use_rep=cluster_key, metric='euclidean', knn=False, method='gauss')
-                else:
-                    sc.pp.neighbors(adata, n_neighbors=n_neigh, use_rep=cluster_key, metric='euclidean', knn=True, method='umap')
+            # DEDUP (algorithm-agnostic): same-spot same-CT cells are EXACT duplicates
+            # (the deconvolution gives every cell of a type in a spot the same profile
+            # -> identical embedding, verified within-spot deviation = 0). Clustering the
+            # UNIQUE representatives is lossless and removes the distance-0 duplicate mass
+            # that fragments Leiden (a dense spot's duplicates form an isolated clique) and
+            # over-weights dense spots in Ward/GMM. Guarded no-op on genuine per-cell
+            # variation or dedup_spots=False. Cluster reps, then broadcast labels to cells.
+            rep_idx, inv = self.__spot_reps(adata, cluster_key, dedup_spots)
+            Xrep = np.asarray(adata.obsm[cluster_key])[rep_idx]
+            n_rep = len(rep_idx)
+            gmm_feasible = True
 
-                sc.tl.leiden(adata, flavor="igraph", n_iterations=-1, resolution=1, key_added="domain",
-                             random_state=seed)
-                self.__merge_clusters(adata, threshold=eff_thresh, embedding_key=cluster_key, label_key="domain")
+            if algorithm == "leiden":
+                rep_labels = self.__leiden_labels(Xrep, n_neighbors, seed, use_gauss_neighbors)
+                merge_mode = "connectivity"
             elif algorithm == "agglomerative":
-                embedding = adata.obsm[cluster_key]
-                k = min(max_k, adata.n_obs)
-                labels = AgglomerativeClustering(n_clusters=k, linkage="ward").fit_predict(embedding)
-                adata.obs["domain"] = pd.Categorical(labels.astype(str))
-                # over-segment into n_clusters, then absorb sub-threshold clusters
-                # into their hierarchical sibling (min Ward-cost neighbor) so the
-                # merge follows the dendrogram rather than an arbitrary centroid.
-                self.__merge_clusters(adata, threshold=eff_thresh,
-                                      embedding_key=cluster_key, label_key="domain",
-                                      merge_mode="sibling")
+                k = min(max_k, n_rep)
+                rep_labels = AgglomerativeClustering(n_clusters=k, linkage="ward").fit_predict(Xrep)
+                # over-segment, then absorb sub-threshold clusters into their
+                # hierarchical sibling (min Ward-cost neighbor).
+                merge_mode = "sibling"
             elif algorithm == "gmm":
-                embedding = adata.obsm[cluster_key]
-                n_max = max(2, min(max_k, adata.n_obs))
-                # BIC-select the mixture, constrained so the smallest component
-                # clears the size floor -> "merging" is choosing a coarser model,
-                # not reassigning cells. Ternary search over the (U-shaped) BIC.
-                labels, feasible = self.__gmm_bic_select(embedding, n_max, eff_thresh, seed)
-                adata.obs["domain"] = pd.Categorical(labels.astype(str))
-                if not feasible:
-                    # even the coarsest model leaves a sub-threshold component ->
-                    # fall back to centroid merge to enforce the size floor
-                    self.__merge_clusters(adata, threshold=eff_thresh,
-                                          embedding_key=cluster_key, label_key="domain",
-                                          merge_mode="cluster")
+                n_max = max(2, min(max_k, n_rep))
+                # BIC-select the mixture, size-floor-constrained. Ternary search over BIC.
+                rep_labels, gmm_feasible = self.__gmm_bic_select(Xrep, n_max, eff_thresh, seed)
+                merge_mode = "cluster"
             else:
                 raise ValueError(f"unknown clustering algorithm: {algorithm}")
+
+            adata.obs["domain"] = pd.Categorical(np.asarray(rep_labels).astype(str)[inv])  # broadcast rep -> cells
+
+            # merge sub-threshold domains on all cells (light safety net: min_cluster_pct
+            # off by default, so only the absolute size floor applies). GMM only if BIC
+            # couldn't already satisfy the floor.
+            if algorithm != "gmm" or not gmm_feasible:
+                self.__merge_clusters(adata, threshold=eff_thresh,
+                                      embedding_key=cluster_key, label_key="domain",
+                                      merge_mode=merge_mode)
         return "domain"
+
+    def __spot_reps(self, adata, cluster_key, dedup_spots=True, dup_tol=1e-3):
+        """Map cells to unique (spot) representatives for algorithm-agnostic dedup.
+
+        Returns (rep_idx, inv): rep_idx[r] is a representative cell of unique spot r,
+        inv[c] is the unique-spot id of cell c, so labels[inv] broadcasts rep labels
+        back to all cells.
+
+        WHY (a workaround for a deconvolution limitation, not a general method):
+        Spotiphy-style deconvolution assigns one per-type expression profile per spot,
+        so every cell of a given type in a spot has *identical* expression -> identical
+        embedding (verified: max within-spot deviation = 0 across all genes/CTs on
+        Kidney). Those exact duplicates sit at distance 0: Leiden fragments (a dense
+        spot's cells form an isolated distance-0 clique -> its own domain; RCC gave 316
+        clusters, dedup -> 11), and Ward/GMM over-weight dense spots. Clustering the
+        unique reps is LOSSLESS *because the cells are identical*.
+
+        GUARDED -- conditional on that duplication. On genuine per-cell variation
+        (single-cell resolution, or a per-cell deconvolution) same-spot cells are NOT
+        identical and clustering all cells is correct; deduping would discard real
+        resolution. So dedup only when max within-spot deviation < dup_tol (per-dataset
+        all-or-nothing); else identity mapping (cluster all cells). dedup_spots=False
+        forces all cells. Per-spot ST data (unique spots) is a natural no-op.
+        """
+        spots = adata.obs['spot_name'].to_numpy() if 'spot_name' in adata.obs else None
+        # embedding is narrow (~20-d) -> full check (no sampling needed)
+        return guarded_spot_reps(np.asarray(adata.obsm[cluster_key]), spots,
+                                 dedup=dedup_spots, tol=dup_tol)
+
+    def __leiden_labels(self, X, n_neighbors, seed, use_gauss_neighbors):
+        """Leiden labels for embedding rows X (already deduped)."""
+        rep = ad.AnnData(np.zeros((len(X), 1), dtype=np.float32))
+        rep.obsm['_rep'] = np.asarray(X)
+        # cap the request at what the data can supply, and floor at 2 so
+        # sc.pp.neighbors / KNeighborsTransformer never sees an invalid k < 1.
+        k = max(2, int(min(n_neighbors, max(2, rep.n_obs - 1))))
+        if use_gauss_neighbors:
+            sc.pp.neighbors(rep, n_neighbors=k, use_rep='_rep', metric='euclidean', knn=False, method='gauss')
+        else:
+            sc.pp.neighbors(rep, n_neighbors=k, use_rep='_rep', metric='euclidean', knn=True, method='umap')
+        sc.tl.leiden(rep, flavor="igraph", n_iterations=-1, resolution=1, key_added="domain",
+                     random_state=seed)
+        return rep.obs['domain'].to_numpy()
 
     @staticmethod
     def __select_multimodal_pcs(pca, var_floor, dip_alpha):
@@ -206,6 +249,7 @@ class HyperSpotClustering(object):
                                  n_clusters: int = 20,
                                  n_neighbors: int = 15,
                                  min_cluster_size: int = 3,
+                                 dedup_spots: bool = True,
                                  select_pcs: bool = False,
                                  pc_var_floor: float = 0.04,
                                  pc_dip_alpha: float = 0.05,
@@ -219,6 +263,7 @@ class HyperSpotClustering(object):
                                   use_gauss_neighbors=False, min_cluster_pct=min_cluster_pct,
                                   seed=seed, n_pca_components=n_pca_components, n_clusters=n_clusters,
                                   n_neighbors=n_neighbors, min_cluster_size=min_cluster_size,
+                                  dedup_spots=dedup_spots,
                                   select_pcs=select_pcs, pc_var_floor=pc_var_floor,
                                   pc_dip_alpha=pc_dip_alpha, select_min_cells=select_min_cells)
 
@@ -237,12 +282,13 @@ class HyperSpotClustering(object):
                                     type_list=[],
                                     embedding_key="embedding",
                                     algorithm: Literal["leiden", "agglomerative", "gmm"] = "leiden",
-                                    min_cluster_pct=0.05,
+                                    min_cluster_pct=-1,   # band-aid off by default: dedup fixes the over-clustering it patched (size floor min_cluster_size=3 stays as a light absolute floor)
                                     seed: int = 0,
                                     n_pca_components: int = 50,
                                     n_clusters: int = 20,
                                     n_neighbors: int = 15,
                                     min_cluster_size: int = 3,
+                                    dedup_spots: bool = True,
                                     select_pcs: bool = False,
                                     pc_var_floor: float = 0.04,
                                     pc_dip_alpha: float = 0.05,
@@ -261,6 +307,7 @@ class HyperSpotClustering(object):
                                       use_gauss_neighbors=False, min_cluster_pct=min_cluster_pct,
                                       seed=seed, n_pca_components=n_pca_components, n_clusters=n_clusters,
                                       n_neighbors=n_neighbors, min_cluster_size=min_cluster_size,
+                                  dedup_spots=dedup_spots,
                                       select_pcs=select_pcs, pc_var_floor=pc_var_floor,
                                       pc_dip_alpha=pc_dip_alpha, select_min_cells=select_min_cells)
 

@@ -69,7 +69,10 @@ class HypergraphEmbedderDriver(object):
             rho_h: float = 1.0,
             lambda_var_h: float = 0.0,
             lambda_cov_h: float = 0.0,
-            lambda_nbr_h: float = 0.0):
+            lambda_nbr_h: float = 0.0,
+            patience: int = 0,
+            min_delta: float = 0.0,
+            min_epochs: int = 0):
 
         project_metadata = ProjectMetadata()
 
@@ -139,6 +142,7 @@ class HypergraphEmbedderDriver(object):
         with tqdm(range(num_epochs)) as e_pbar:
             max_epoch_loss = None
             min_epoch_loss = None
+            epochs_no_improve = 0
             for epoch in e_pbar:
                 # create function for 1 epoch that returns the loss
                 num_batches = len(hgloader)
@@ -166,10 +170,14 @@ class HypergraphEmbedderDriver(object):
 
                 self.scheduler.step()   # cosine lr anneal, once per epoch
 
-                # TODO save best model
                 if not max_epoch_loss or epoch_loss > max_epoch_loss:
                     max_epoch_loss = epoch_loss
-                if not min_epoch_loss or epoch_loss < min_epoch_loss:
+
+                # Reset the patience counter only on a *meaningful* (> min_delta)
+                # improvement, but still checkpoint on any new best so the saved
+                # model is always the lowest-loss one seen.
+                improved = (min_epoch_loss is None) or (epoch_loss < min_epoch_loss - min_delta)
+                if (min_epoch_loss is None) or (epoch_loss < min_epoch_loss):
                     min_epoch_loss = epoch_loss
                     checkpoint = {
                         'epoch': epoch,
@@ -179,14 +187,25 @@ class HypergraphEmbedderDriver(object):
                         'loss': min_epoch_loss
                     }
                     torch.save(checkpoint, project_metadata.project_folder / f'{self.model.checkpoint_name()}.pth')
+                epochs_no_improve = 0 if improved else epochs_no_improve + 1
 
                 e_pbar.set_postfix({
                     'epoch_loss': epoch_loss,
                     'node': epoch_node,
                     'hedge': epoch_hedge,
-                    'max_loss': max_epoch_loss,
                     'min_loss': min_epoch_loss,
+                    'no_improve': epochs_no_improve,
                     'lr': self.scheduler.get_last_lr()[0]})
+
+                # Early stopping at convergence: stop once the loss has plateaued
+                # (no > min_delta improvement) for `patience` epochs. patience=0
+                # disables it (runs the full num_epochs). min_epochs guards against
+                # stopping during an early, noisy dip -- relevant here since the
+                # K/M sampling makes per-epoch loss stochastic.
+                if patience > 0 and (epoch + 1) >= min_epochs and epochs_no_improve >= patience:
+                    logger.info(f"Early stopping at epoch {epoch}: no >{min_delta} "
+                                f"improvement for {patience} epochs (best {min_epoch_loss:.6f}).")
+                    break
 
                     
     def __configure_optimizer(self, num_epochs):

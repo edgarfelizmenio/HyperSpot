@@ -13,21 +13,30 @@ from ..metadata import ProjectMetadata
 from ..utils import save_ct_spatial_data, load_ct_spatial_data
 
 # Make cell type-specific adata objects
-def make_ct_spatial_adata(adata_decomp):
-    project_metadata = ProjectMetadata() 
-    
+def make_ct_spatial_adata(adata_decomp, overwrite=False):
+    project_metadata = ProjectMetadata()
+
     cell_types = project_metadata.ct_list
     cell_type_key = project_metadata.ct_key
-    
+
     for ct in cell_types:
+        out_path = project_metadata.ct_data_dir / f"ST_cell_{ct}.h5ad"
+        if not overwrite and out_path.exists():
+            print(f"{ct}: {out_path.name} exists, skipping (overwrite=False)")
+            continue
+
         adata_ct = adata_decomp[adata_decomp.obs[cell_type_key] == ct].copy()
 
         # drop genes that have 0 expression
-        print(f"{ct} before filter:", adata_ct.n_vars)
+        pre_filter_genes = adata_ct.n_vars
         sc.pp.filter_genes(adata_ct, min_cells=1)
-        print(f"{ct} after filter:", adata_ct.n_vars)
+        post_filter_genes = adata_ct.n_vars
+
+        print(f"{ct} # of genes: {pre_filter_genes} -> {post_filter_genes}")
+
         # preprocess cell type-specific data
         adata_ct.raw = adata_ct.copy()
+        
         # Spotiphy output is already in CPM so no need to normalize
         # Compute log normalization
         sc.pp.log1p(adata_ct)
@@ -37,12 +46,17 @@ def make_ct_spatial_adata(adata_decomp):
         save_ct_spatial_data(adata_ct, ct)
 
 # Perform feature selection on each cell type.
-def perform_ct_feature_selection(n_features = 3000):
-    project_metadata = ProjectMetadata() 
+def perform_ct_feature_selection(n_features = 3000, overwrite=False):
+    project_metadata = ProjectMetadata()
+    ct_feature_filename = project_metadata.project_folder / "ct_features.pkl"
+    if not overwrite and ct_feature_filename.exists():
+        print(f"{ct_feature_filename.name} exists, skipping feature selection (overwrite=False)")
+        return
+
     cell_types = project_metadata.ct_list
 
     ct_feats = {}
-    
+
     for ct in cell_types:
         adata_ct = load_ct_spatial_data(ct)
 

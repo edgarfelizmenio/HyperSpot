@@ -73,7 +73,7 @@ def plot_domain_svgs(adata, top_genes, regions = list[str],
             fig.delaxes(ax_region)
             fig.delaxes(ax_expr)
 
-    plt.tight_layout()
+    plt.gcf().set_layout_engine("tight")
     
     if save:
         plt.savefig(project_metadata.plot_dir / f'top_de_genes.{file_ext}', transparent=True)
@@ -117,7 +117,7 @@ def plot_domain_de_genes(adata,
         ax = axes[1],
     )
 
-    plt.tight_layout()
+    plt.gcf().set_layout_engine("tight")
     plt.show()
 
     # plot gene expression
@@ -148,7 +148,7 @@ def plot_domain_de_genes(adata,
         else:
             fig.delaxes(ax)
 
-    plt.tight_layout()
+    plt.gcf().set_layout_engine("tight")
     plt.show()
 
     del adata_plot
@@ -196,7 +196,7 @@ def plot_domain_ct_svgs(adata,
     violin_ax.set_xticks(list(range(limit)))
     violin_ax.set_xticklabels(gene_names)
     
-    plt.tight_layout()
+    plt.gcf().set_layout_engine("tight")
     plt.show()
 
     # plot gene expression
@@ -233,7 +233,7 @@ def plot_domain_ct_svgs(adata,
         else:
             fig.delaxes(ax)
 
-    plt.tight_layout()
+    plt.gcf().set_layout_engine("tight")
     plt.show()
     
     del adata_region, adata_plot    
@@ -264,7 +264,7 @@ def plot_ct_decomposition(adata, ct_key='cell_type', n_cols = 4, figsize: tuple 
         else:
             fig.delaxes(ax)
 
-    plt.tight_layout()
+    plt.gcf().set_layout_engine("tight")
     plt.show()
 
 def plot_ct_marker_groups_heatmap(adata, 

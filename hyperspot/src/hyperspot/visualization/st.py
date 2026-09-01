@@ -31,7 +31,7 @@ def plot_st_gene_counts(figsize: tuple = (4, 4),
     if not show_title:
         ax.set_title(None)
     
-    plt.tight_layout()
+    plt.gcf().set_layout_engine("tight")
 
     if save:
         plt.savefig(project_metadata.plot_dir / f'{'ST Data'}.{file_ext}', 
@@ -67,7 +67,7 @@ def plot_aggr_st_domains(figsize: tuple = (4, 4),
     if not show_title:
         ax.set_title(None)
     
-    plt.tight_layout()
+    plt.gcf().set_layout_engine("tight")
 
     if save:
         plt.savefig(

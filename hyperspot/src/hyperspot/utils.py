@@ -1,9 +1,66 @@
 import scanpy as sc
 import torch
+import numpy as np
+import pandas as pd
+import scipy.sparse as sp
 
 from pathlib import Path
 
 from .metadata import ProjectMetadata
+
+
+# --- spot-duplicate primitives (single source of truth) ------------------------
+# Spotiphy-style deconvolution assigns one per-type profile per spot, so same-spot
+# same-CT cells are exact duplicates (identical expression -> identical embedding).
+# The dedup used in clustering + ctSVG detection, and the standalone verification,
+# all rest on the two functions below so the check can never silently drift.
+
+def within_spot_max_deviation(X, spot_labels, sample=None, seed=0):
+    """Max abs deviation of any cell from its spot's first cell, over features.
+
+    ~0 => same-spot cells are (near-)identical duplicates. `sample` limits the check
+    to that many randomly chosen multi-cell spots (for wide/sparse expression
+    matrices where materialising all cells is costly); None checks every cell.
+    """
+    spot_labels = np.asarray(spot_labels)
+    n = len(spot_labels)
+    if n == 0:
+        return 0.0
+    _, inv = np.unique(spot_labels, return_inverse=True)
+    if sample is None:
+        Xd = np.asarray(X.todense()) if sp.issparse(X) else np.asarray(X)
+        rep = pd.Series(np.arange(n)).groupby(inv).first().sort_index().to_numpy()
+        return float(np.abs(Xd - Xd[rep][inv]).max())
+    multi = np.where(np.bincount(inv) >= 2)[0]
+    if len(multi) == 0:
+        return 0.0
+    rng = np.random.default_rng(seed)
+    check = multi if len(multi) <= sample else rng.choice(multi, sample, replace=False)
+    dev = 0.0
+    for g in check:
+        members = np.where(inv == g)[0]
+        Xm = X[members]
+        Xm = np.asarray(Xm.todense()) if sp.issparse(Xm) else np.asarray(Xm)
+        dev = max(dev, float(np.abs(Xm - Xm[0]).max()))
+    return dev
+
+
+def guarded_spot_reps(X, spot_labels, dedup=True, tol=1e-3, sample=None):
+    """(rep_idx, inv) collapsing same-spot cells to one representative -- but ONLY
+    when they are (near-)identical (max within-spot deviation < tol). Otherwise, or
+    when dedup=False / no spot labels, returns the identity mapping (every cell its
+    own unit). rep_idx[r] is a representative cell of unique spot r; inv[c] is the
+    unit id of cell c (labels[inv] broadcasts unit labels back to cells).
+    """
+    n = X.shape[0]                                      # one unit per cell (row of X)
+    inv = np.arange(n)                                  # identity: no dedup
+    if dedup and n > 0 and spot_labels is not None:
+        _, cand = np.unique(np.asarray(spot_labels), return_inverse=True)
+        if within_spot_max_deviation(X, spot_labels, sample=sample) < tol:
+            inv = cand
+    rep_idx = pd.Series(np.arange(n)).groupby(inv).first().sort_index().to_numpy()
+    return rep_idx, inv
+# -------------------------------------------------------------------------------
 
 def save_orig_st_data(adata_st):
     adata_st.write_h5ad(ProjectMetadata().project_folder / 'ST_orig.h5ad')

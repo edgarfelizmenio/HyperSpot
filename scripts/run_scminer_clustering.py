@@ -17,6 +17,7 @@ HyperSpot environment without requiring scMiner.
 
 import argparse
 import re
+import shutil
 import subprocess
 import tempfile
 from pathlib import Path
@@ -30,11 +31,12 @@ def ct_safe(ct: str) -> str:
 
 
 def run_mica(h5ad_path: Path, out_dir: Path, resolution: float, num_workers: int,
-             n_cells: int = 10000) -> Path:
+             n_cells: int = 10000, nnm: int = None, nne: int = None,
+             annef: int = None) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
-    nnm   = min(80, n_cells // 2)
-    nne   = min(20, n_cells - 1)
-    annef = max(200, nnm * 2)
+    if nnm is None:   nnm   = min(80, n_cells // 2)
+    if nne is None:   nne   = min(20, n_cells - 1)
+    if annef is None: annef = max(200, nnm * 2)
     cmd = [
         "mica", "ge",
         "-i", str(h5ad_path),
@@ -49,7 +51,8 @@ def run_mica(h5ad_path: Path, out_dir: Path, resolution: float, num_workers: int
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
         print(result.stderr)
-        raise RuntimeError(f"MICA failed with return code {result.returncode}")
+        raise RuntimeError(f"MICA failed (nnm={nnm}, nne={nne}, annef={annef}, "
+                           f"return code {result.returncode})")
     return out_dir  # caller reads clustering_*.txt from here
 
 
@@ -93,8 +96,27 @@ def main():
             adata_ct.write_h5ad(str(ct_h5ad))
 
             mica_out = tmp / f"{safe}_mica"
-            clustered_h5ad = run_mica(ct_h5ad, mica_out, args.resolution, args.num_workers,
-                                      n_cells=adata_ct.n_obs)
+            # MICA's HNSW ANN fails on small cell types ("ef or M is too small")
+            # when nnm (neighbors) is a large fraction of the cell count. Retry with
+            # progressively fewer neighbors and a larger search ef before giving up.
+            _n = adata_ct.n_obs
+            _attempts = [
+                {},                                                                  # default heuristic
+                {"nnm": min(30, max(5, _n // 4)), "nne": min(15, _n - 1), "annef": 500},
+                {"nnm": min(15, max(5, _n // 8)), "nne": min(10, _n - 1), "annef": 1000},
+            ]
+            for _k, _params in enumerate(_attempts):
+                if mica_out.exists():
+                    shutil.rmtree(mica_out)
+                try:
+                    run_mica(ct_h5ad, mica_out, args.resolution, args.num_workers,
+                             n_cells=_n, **_params)
+                    break
+                except RuntimeError as _e:
+                    if _k == len(_attempts) - 1:
+                        raise
+                    print(f"  MICA attempt {_k + 1} failed; retrying with fewer "
+                          f"neighbors / larger ef. [{_e}]", flush=True)
 
             # MICA writes clusters + embedding to clustering_*.txt (not to clustered.h5ad)
             txt_files = list(mica_out.glob("clustering_*.txt"))

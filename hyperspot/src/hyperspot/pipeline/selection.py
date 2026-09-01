@@ -7,11 +7,39 @@ import scanpy as sc
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
+import scipy.sparse as sp
+
 from ..metadata import ProjectMetadata
 from ..utils import (
     load_ct_spatial_data,
-    load_aggr_st_data
+    load_aggr_st_data,
+    guarded_spot_reps,
 )
+
+
+def dedup_by_spot(adata, tol=1e-3, sample=100):
+    """Collapse same-spot cells to one representative for spatial DE.
+
+    Same-spot same-CT cells are EXACT deconvolution duplicates: Spotiphy assigns
+    one per-type profile per spot, so every cell of a type in a spot has identical
+    expression. Counting each replicate inflates the Wilcoxon sample size AND the
+    `pts` (fraction expressing), making genes look artificially significant and
+    over-weighting dense spots. Deduping to unique spots makes each an independent
+    observation -- lossless *because* the cells are identical.
+
+    Guarded (shares `guarded_spot_reps` with the clustering dedup): only dedup when
+    same-spot cells really are (near-)identical; on data with genuine per-cell
+    variation return adata unchanged so the standard per-cell test is used. Per-spot
+    ST data (unique spots) is a natural no-op. Expression is wide/sparse -> the
+    guard checks a sample of multi-cell spots.
+    """
+    if 'spot_name' not in adata.obs or adata.n_obs == 0:
+        return adata
+    rep_idx, _ = guarded_spot_reps(adata.X, adata.obs['spot_name'].to_numpy(),
+                                   dedup=True, tol=tol, sample=sample)
+    if len(rep_idx) == adata.n_obs:
+        return adata                                     # no dedup (no dups, or genuine variation)
+    return adata[rep_idx].copy()
 
 
 def _permutation_worker(ranks, domains, unique_domains, obs_dev, mu, batch_n, seed):
@@ -66,19 +94,21 @@ def compute_domain_svgs(
     min_pts: float = 0.8,
     min_logfc: float = 1.5,
     rank_by: str = 'scores',
+    dedup_spots: bool = True,
 ):
     project_metadata = ProjectMetadata()
-    
-    # load adata for cell type    
+
+    # ST-level (per-spot aggregated) data -> unique spots -> dedup is a no-op
     adata_aggr = load_aggr_st_data()
-    
+
     return compute_spatial_de_genes(
         adata_aggr,
         key,
         min_pts,
         min_logfc,
         rank_by,
-    )    
+        dedup_spots=dedup_spots,
+    )
     
 def compute_domain_ct_svgs(
     cell_type: str,
@@ -86,99 +116,190 @@ def compute_domain_ct_svgs(
     min_pts: float = 0.8,
     min_logfc: float = 1.5,
     rank_by: str = 'scores',
+    dedup_spots: bool = True,
 ):
     project_metadata = ProjectMetadata()
-    
-    # load adata for cell type    
+
+    # load adata for cell type
     adata_ct = load_ct_spatial_data(cell_type)
-    
+
     return compute_spatial_de_genes(
         adata_ct,
         key,
         min_pts,
         min_logfc,
         rank_by,
+        dedup_spots=dedup_spots,
     )
+
+def _compute_spatial_de_table(
+    adata,
+    key: str = 'domain',
+    method: str = 'wilcoxon',
+    min_pts: float = 0.8,
+    min_logfc: float = 1.5,
+    require_specificity: bool = False,
+    pval_adjust: str = 'none',
+    pval_thresh: float = None,
+    filter_mode: str = 'drop',
+    best_domain_per_gene: bool = False,
+    dedup_spots: bool = True,
+    n_permutations: int = 999,
+    permutation_seed: int = 0,
+    n_workers: int = None,
+):
+    """Single engine for spatial-DE / (ct)SVG statistics -> flat per-(gene, domain) DataFrame.
+
+    Shared by the tissue-wide SVG path (compute_domain_svgs), the per-cell-type
+    ctSVG detection path (compute_domain_ct_svgs) -- both via compute_spatial_de_genes
+    -- and the scoring path (compute_ct_svg_scores); these differ only in the flags
+    below.
+
+    method : 'wilcoxon' | 'kruskal' | 'wilcoxon_permutation'
+        Which p-value to report in `pval`. 'wilcoxon' = scanpy one-vs-rest normal
+        approximation; 'kruskal' = KW omnibus per gene (annotated with the best
+        Wilcoxon domain, so inherently one row per gene); 'wilcoxon_permutation' =
+        empirical permutation p-value.
+    require_specificity : bool
+        Add the pts/pts_rest > 1 term (gene detected in a larger fraction of the
+        domain than outside). Enabled by the detection wrapper, disabled by scoring
+        -- with pts >= min_pts already enforced it is near-redundant, so scoring
+        leaves it off. pts_rest == 0 counts as specific.
+    pval_adjust : 'scanpy' | 'none'
+        'scanpy' surfaces scanpy's BH-adjusted p-value as `pvals_adj` and lets
+        `pval_thresh` filter on it (only valid for method='wilcoxon'). 'none' reports
+        no adjusted p-value and applies no p-value filter (scoring defers BH to
+        compile_ct_svg_scores).
+    pval_thresh : float or None
+        Cutoff applied to the adjusted p-value; requires pval_adjust='scanpy'.
+    filter_mode : 'drop' | 'annotate' | 'none'
+        How the pts/logfc/specificity/pval mask is applied. 'drop' removes failing
+        rows (detection, wilcoxon scoring); 'annotate' keeps all rows and adds a
+        `passes_filter` column (kruskal scoring); 'none' keeps all rows with no mask
+        (permutation scoring, where the empirical p-value stands alone).
+    best_domain_per_gene : bool
+        Collapse to one row per gene (its max-Wilcoxon-score domain).
+
+    Columns: gene, domain, scores, logfoldchanges, pts, pts_rest, pval
+             [, pvals_adj if pval_adjust='scanpy'] [, passes_filter if annotate].
+    """
+    # dedup_spots=True (default, Spotiphy): same-spot same-CT cells are exact
+    # deconvolution duplicates -> collapse to unique spots so the Wilcoxon test
+    # (and pts) treats each spot as one observation, not N identical replicates.
+    # Internally guarded, so it is a no-op if cells actually vary. Set False for
+    # benchmarks on real per-cell expression to force the standard per-cell test.
+    if dedup_spots:
+        adata = dedup_by_spot(adata)
+
+    # Robustness for sparse cell types (e.g. pDC, mast): after dedup a domain can
+    # hold a single observation, which Wilcoxon cannot test ("groups 0 ... only
+    # contain one sample"). Restrict the tested groups to domains with >= 2
+    # observations (singleton domains stay in the one-vs-rest background). If fewer
+    # than two domains remain or none is testable there is no ct-SVG structure to
+    # detect, so return an empty table and let the caller skip this cell type
+    # instead of crashing the whole run.
+    # Drop stale/unused cluster labels first: a categorical carrying 0-cell
+    # categories makes scanpy try to test empty groups ("only contain one sample"
+    # crash, or Mean-of-empty-slice / divide-by-zero warnings).
+    adata.obs[key] = adata.obs[key].astype('category').cat.remove_unused_categories()
+    counts = adata.obs[key].value_counts()
+    counts = counts[counts > 0]
+    testable = [g for g, c in counts.items() if c >= 2]
+    if len(testable) == 0 or len(counts) < 2:
+        import warnings
+        warnings.warn(
+            f"_compute_spatial_de_table: skipping DE on '{key}' -- need >=2 domains "
+            f"with >=2 observations (have {len(counts)} domain(s), sizes "
+            f"{counts.to_dict()}); returning no genes (sparse cell type).")
+        cols = ['gene', 'domain', 'scores', 'logfoldchanges', 'pts', 'pts_rest', 'pval']
+        if pval_adjust == 'scanpy':
+            cols.append('pvals_adj')
+        if filter_mode == 'annotate':
+            cols.append('passes_filter')
+        return pd.DataFrame({c: pd.Series(dtype=object) for c in cols})
+
+    # Always pass the explicit list of testable domains (never 'all'): this both
+    # excludes singleton domains from being tested (they stay in the one-vs-rest
+    # background) and prevents scanpy from touching any 0-cell category.
+    sc.tl.rank_genes_groups(adata, groupby=key, groups=list(testable),
+                            method='wilcoxon', pts=True, use_raw=False)
+    rg = adata.uns['rank_genes_groups']
+
+    if method == 'kruskal':
+        # already one row per gene (KW omnibus); recompute passes_filter uniformly
+        df = _run_kruskal_per_ct(adata, key, rg, min_pts, min_logfc)
+        df = df.drop(columns=['passes_filter'])
+    elif method == 'wilcoxon_permutation':
+        df = _run_wilcoxon_permutation_per_ct(
+            adata, key, rg, n_permutations=n_permutations,
+            seed=permutation_seed, n_workers=n_workers)
+    else:  # wilcoxon
+        df = _run_wilcoxon_per_domain(adata, key, rg)
+        df.rename(columns={'names': 'gene', 'pvals': 'pval'}, inplace=True)
+
+    if pval_adjust == 'scanpy':
+        if 'pvals_adj' not in df.columns:
+            raise ValueError(
+                "pval_adjust='scanpy' is only available for method='wilcoxon'")
+        # keep pvals_adj as-is (already carried through); nothing else to do
+
+    # passing mask: prevalence + fold change (+ optional specificity + optional p)
+    mask = (df['pts'] >= min_pts) & (df['logfoldchanges'] >= min_logfc)
+    if require_specificity:
+        ratio = df['pts'] / df['pts_rest'].replace(0, np.nan)
+        mask &= (ratio > 1) | df['pts_rest'].eq(0)
+    if pval_adjust == 'scanpy' and pval_thresh is not None:
+        mask &= df['pvals_adj'] < pval_thresh
+
+    if filter_mode == 'drop':
+        df = df[mask].copy()
+    elif filter_mode == 'annotate':
+        df = df.copy()
+        df['passes_filter'] = mask.values
+
+    if best_domain_per_gene:
+        df = df.loc[df.groupby('gene')['scores'].idxmax()]
+
+    cols = ['gene', 'domain', 'scores', 'logfoldchanges', 'pts', 'pts_rest', 'pval']
+    if pval_adjust == 'scanpy' and 'pvals_adj' in df.columns:
+        cols.append('pvals_adj')
+    if 'passes_filter' in df.columns:
+        cols.append('passes_filter')
+    return df[cols].reset_index(drop=True)
+
 
 def compute_spatial_de_genes(adata,
                              key: str = 'domain',
                              min_pts: float = 0.8,
                              min_logfc: float = 1.5,
                              rank_by: str = 'scores',
+                             dedup_spots: bool = True,
                             ):
+    """Detection path: filtered spatial DE genes per domain, as {domain: df}.
 
-    project_metadata = ProjectMetadata()
-    
-    sc.tl.rank_genes_groups(adata, 
-                            groupby=key,
-                            method="wilcoxon",
-                            pts=True,
-                            use_raw=False)
-    
-    rg = adata.uns['rank_genes_groups']
-    groups = list(rg['names'].dtype.names)
+    Thin wrapper over _compute_spatial_de_table with the detection configuration:
+    Wilcoxon, specificity on (pts/pts_rest > 1), and scanpy BH-adjusted p < 0.05.
+    Returns {domain: DataFrame} sorted by `rank_by`; each df carries the columns
+    create_svg_list consumes (`names`, `scores`/rank_by, `pvals_adj`).
+    """
+    flat = _compute_spatial_de_table(
+        adata,
+        key=key,
+        method='wilcoxon',
+        min_pts=min_pts,
+        min_logfc=min_logfc,
+        require_specificity=True,
+        pval_adjust='scanpy',
+        pval_thresh=0.05,
+        filter_mode='drop',
+        dedup_spots=dedup_spots,
+    )
+    flat = flat.rename(columns={'gene': 'names'})
 
     results = {}
-
-    for group in groups:
-        df = sc.get.rank_genes_groups_df(
-            adata, group=group,
-        )
-
-        # group_idx = groups.index(group)
-
-        df['pts'] = df['names'].map(rg['pts'][group])
-        df['pts_rest'] = df['names'].map(rg['pts_rest'][group])
-        
-        # n_c = (adata_ct.obs[key] == group).sum()
-        # n_r = (adata_ct.obs[key] != group).sum()
-
-        # df['recall'] = df['pts']
-        # df['precision'] = (
-        #     df["pts"] * n_c /
-        #     (df["pts"] * n_c + df["pts_rest"] * n_r + 1e-12)
-        # )
-        
-        # df['specificity'] = df['pts'] - df['pts_rest']
-        # df['f1'] = (
-        #     2 * df['precision'] * df['recall'] / (df['precision'] + df['recall'] + 1e-12)
-        # )
-
-        # Filter irrelevant genes, downregulated genes, low coverage genes
-        df = df[
-            (df['pvals_adj'] < 0.05) &
-            # only select genes expressed in at least 80% of the region
-            (df['pts'] > min_pts) &
-            # select genes expressed more in the region than outside
-            ((df['pts'] / df['pts_rest']) > 1) &
-            # only select genes that are upregulated
-            (df['logfoldchanges'] > min_logfc)
-        ]
-
-        # df["consistency_rank"] = df["scores"].rank(pct=True)
-        # df["f1_rank"] = df["f1"].rank(pct=True)
-        # df["precision_rank"] = df["precision"].rank(pct=True)
-        
-        # df["consistency+f1"] = (
-        #     df["consistency_rank"] + 
-        #     df["f1_rank"]
-        # ) / 2
-
-        # df["consistency+precision"] = (
-        #     df["consistency_rank"] + 
-        #     df["precision_rank"]
-        # ) / 2
-
-        if rank_by == 'scores':
-            results[group] = df.sort_values(rank_by, ascending=False)
-        else:
-            results[group] = df.sort_values(rank_by)
-    
-        # df = df.sort_values("combined_score", ascending=False)
-
-        # top_df = df.nsmallest(n_results, "combined_score")
-        # results[group] = top_df
-        
+    ascending = rank_by != 'scores'
+    for group, grp in flat.groupby('domain'):
+        results[group] = grp.sort_values(rank_by, ascending=ascending).reset_index(drop=True)
     return results
 
 def _run_wilcoxon_permutation_per_ct(adata_ct, key, rg,
@@ -261,7 +382,7 @@ def _run_wilcoxon_per_domain(adata_ct, key, rg):
     domain_dfs = []
     for group in groups:
         df = sc.get.rank_genes_groups_df(adata_ct, group=group)[
-            ['names', 'scores', 'pvals', 'logfoldchanges']
+            ['names', 'scores', 'pvals', 'pvals_adj', 'logfoldchanges']
         ]
         df['pts']      = df['names'].map(rg['pts'][group])
         df['pts_rest'] = df['names'].map(rg['pts_rest'][group])
@@ -321,9 +442,12 @@ def compute_ct_svg_scores(
     min_pts: float = 0.8,
     min_logfc: float = 1.0,
     method: str = 'wilcoxon',
+    pval_adjust: str = 'scanpy',
     n_permutations: int = 999,
     permutation_seed: int = 0,
     n_workers: int = None,
+    dedup_spots: bool = True,
+    best_domain_per_gene: bool = False,
 ):
     """
     Score genes for ctSVG detection and save per-CT results.
@@ -351,41 +475,60 @@ def compute_ct_svg_scores(
         (gene, domain) pairs are written.
         Columns: gene, domain, scores, logfoldchanges, pts, pts_rest, pval.
 
+    dedup_spots (default True): collapse same-spot same-CT duplicate cells to one
+        representative before scoring, so the Wilcoxon/KW test and pts treat each spot
+        as one observation instead of N identical replicates (aligns with the detection
+        path compute_domain_ct_svgs). Guarded -> no-op if cells genuinely vary. Set
+        False to score on all cells (real per-cell expression benchmarks).
+
+    best_domain_per_gene (default False): output granularity. False keeps the full
+        gene list (one row per passing gene-domain); True collapses to one row per
+        gene, its max-Wilcoxon-score domain. (kruskal already returns best-domain-
+        per-gene -- its p-value is a single omnibus per gene -- so the flag is a no-op
+        there.)
+
+    pval_adjust (default 'scanpy'): how compile_ct_svg_scores derives adj_pval.
+        'scanpy' carries scanpy's inline BH-adjusted p-value (pvals_adj) through to
+        the raw CSV, aligning scoring with the detection path (compute_domain_ct_svgs),
+        which uses the same adjustment. Only defined for method='wilcoxon'; kruskal /
+        wilcoxon_permutation have no scanpy pvals_adj, so they fall back to 'none'
+        (compile applies its own best-domain BH). 'none' forces compile-step BH for
+        any method.
+
     Output filenames: <ct_safe>_raw.csv  (default dir: ProjectMetadata().domain_markers_dir)
-    Run compile_ct_svg_scores() to aggregate and compute adj_pval.
+    Run compile_ct_svg_scores() to aggregate and finalize adj_pval.
     """
     project_metadata = ProjectMetadata()
     out_dir = Path(out_dir) if out_dir is not None else project_metadata.domain_markers_dir
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    # scoring path: same engine as detection, but specificity off and no inline
+    # p-value filter (BH is deferred to compile_ct_svg_scores). filter_mode keeps
+    # each method's granularity -- wilcoxon drops non-passing genes; kruskal keeps
+    # all and annotates passes_filter; permutation keeps all (empirical p stands).
+    filter_mode = {'kruskal': 'annotate', 'wilcoxon_permutation': 'none'}.get(method, 'drop')
+    # scanpy inline BH (pvals_adj) is only defined for the Wilcoxon test; for the
+    # other statistics there is no scanpy-adjusted p-value, so defer to compile-BH.
+    eff_adjust = pval_adjust if method == 'wilcoxon' else 'none'
+
     for ct in project_metadata.ct_list:
         adata_ct = load_ct_spatial_data(ct)
-        sc.tl.rank_genes_groups(adata_ct, groupby=key, method='wilcoxon',
-                                pts=True, use_raw=False)
-        rg = adata_ct.uns['rank_genes_groups']
-
-        if method == 'kruskal':
-            result = _run_kruskal_per_ct(adata_ct, key, rg, min_pts, min_logfc)
-            result.to_csv(out_dir / f'{_ct_safe(ct)}_raw.csv', index=False)
-        elif method == 'wilcoxon_permutation':
-            result = _run_wilcoxon_permutation_per_ct(
-                adata_ct, key, rg,
-                n_permutations=n_permutations,
-                seed=permutation_seed,
-                n_workers=n_workers,
-            )
-            result.to_csv(out_dir / f'{_ct_safe(ct)}_raw.csv', index=False)
-        else:
-            all_domains = _run_wilcoxon_per_domain(adata_ct, key, rg)
-            passing = all_domains[
-                (all_domains['pts']           >= min_pts) &
-                (all_domains['logfoldchanges'] >= min_logfc)
-            ].copy()
-            passing.rename(columns={'names': 'gene', 'pvals': 'pval'}, inplace=True)
-            passing[['gene', 'domain', 'scores', 'logfoldchanges',
-                     'pts', 'pts_rest', 'pval']].to_csv(
-                out_dir / f'{_ct_safe(ct)}_raw.csv', index=False
-            )
+        result = _compute_spatial_de_table(
+            adata_ct,
+            key=key,
+            method=method,
+            min_pts=min_pts,
+            min_logfc=min_logfc,
+            require_specificity=False,
+            pval_adjust=eff_adjust,
+            filter_mode=filter_mode,
+            best_domain_per_gene=best_domain_per_gene,
+            dedup_spots=dedup_spots,
+            n_permutations=n_permutations,
+            permutation_seed=permutation_seed,
+            n_workers=n_workers,
+        )
+        result.to_csv(out_dir / f'{_ct_safe(ct)}_raw.csv', index=False)
 
     print(f"Saved per-CT per-domain scores to {out_dir}")
 
@@ -400,7 +543,10 @@ def compile_ct_svg_scores(
     Reads <ct_safe>_raw.csv files written by compute_ct_svg_scores(), then
     for each cell type:
       1. Selects the best domain per gene (max Wilcoxon score).
-      2. Applies per-CT BH correction on the raw p-values of surviving genes.
+      2. Finalizes adj_pval: if the raw file carries scanpy's pvals_adj
+         (pval_adjust='scanpy', the default -- aligned with detection), the best
+         domain's scanpy-adjusted p-value is used directly; otherwise a per-CT BH
+         correction is applied to the raw p-values of surviving genes.
       3. Writes one benchmarking CSV per cell type.
 
     Default in_dir and out_dir: ProjectMetadata().domain_markers_dir
@@ -430,9 +576,15 @@ def compile_ct_svg_scores(
                 out_cols.append('passes_filter')
             pd.DataFrame(columns=out_cols).to_csv(out_dir / f'{_ct_safe(ct)}.csv')
             continue
-        _, adj_pvals, _, _ = multipletests(best['pval'].values, method='fdr_bh')
         best['CombinedPvals'] = best['pval']
-        best['adj_pval']      = adj_pvals
+        if 'pvals_adj' in best.columns:
+            # scanpy inline BH carried through from compute_ct_svg_scores(pval_adjust=
+            # 'scanpy'): use the best domain's scanpy-adjusted p-value directly, so
+            # scoring shares the detection path's adjustment (no compile-step BH).
+            best['adj_pval'] = best['pvals_adj'].values
+        else:
+            _, adj_pvals, _, _ = multipletests(best['pval'].values, method='fdr_bh')
+            best['adj_pval'] = adj_pvals
         if 'passes_filter' in best.columns:
             best.loc[~best['passes_filter'].astype(bool), 'adj_pval'] = 1.0
         best.rename(columns={'domain': 'best_domain'}, inplace=True)
@@ -547,5 +699,212 @@ def create_svg_list(
         orient="index",
         columns = ['scores', 'adjusted p-vals', 'region']
     ).sort_values(['region', 'scores'], ascending=[True, False])
-    
+
     return all_genes_df
+
+
+def compute_ct_metagenes(
+    cell_type: str,
+    k: int = 3,
+    genes: list = None,
+    min_pts: float = 0.8,
+    min_logfc: float = 1.5,
+    n_top: int = 40,
+    random_state: int = 0,
+    max_iter: int = 800,
+):
+    """Meta-gene decomposition of a cell type's spatial program (CELINA-style).
+
+    A ct-SVG *domain* is a hard spatial partition; a *metagene* is a soft gene module
+    -- a group of genes that co-vary in space regardless of domain boundaries. CELINA
+    (Shang et al. 2025) reconstructs kidney RCC metagenes (PT / EMT / IFN-gamma) by
+    clustering ct-SVGs on their spatial pattern. This does the equivalent with
+    non-negative matrix factorization on the (cell-type-attributed) spot x gene matrix
+    restricted to that cell type's ct-SVGs: X (spots x genes) ~= W (spots x k) @ H
+    (k x genes). Each of the k rows of H is a metagene (gene loadings); each column of
+    W is that metagene's spatial intensity across spots.
+
+    Parameters
+    ----------
+    cell_type : which cell type's ct-spatial adata to decompose (load_ct_spatial_data).
+    k         : number of metagenes (CELINA used 3 for RCC).
+    genes     : gene set to factorize; default = the union of this cell type's per-domain
+                ct-SVGs (compute_domain_ct_svgs), i.e. the spatially variable program only.
+    n_top     : how many top-loading genes to list per metagene.
+
+    Returns a dict:
+      loadings    -- DataFrame (genes x k) of H.T, gene loadings per metagene.
+      spot_scores -- DataFrame (spots x k) of W, per-spot metagene intensity (index = obs).
+      top_genes   -- {j: [gene, ...]} top-n_top genes per metagene by loading.
+      genes       -- the gene set actually used.
+      recon_err   -- NMF reconstruction error.
+    """
+    from sklearn.decomposition import NMF
+
+    adata_ct = load_ct_spatial_data(cell_type)
+    if genes is None:
+        dom = compute_domain_ct_svgs(cell_type, min_pts=min_pts, min_logfc=min_logfc)
+        genes = sorted({
+            g for df in dom.values()
+            for g in (df['names'] if 'names' in df.columns else df.index)
+        })
+    genes = [g for g in genes if g in adata_ct.var_names]
+    if len(genes) < k:
+        raise ValueError(f"only {len(genes)} of the requested genes are in "
+                         f"{cell_type}'s var; need >= k={k}.")
+
+    A = adata_ct[:, genes]
+    X = A.X
+    X = np.asarray(X.todense()) if sp.issparse(X) else np.asarray(X)
+    X = np.maximum(X, 0.0)  # NMF requires non-negative input
+
+    nmf = NMF(n_components=k, init='nndsvda', random_state=random_state,
+              max_iter=max_iter)
+    W = nmf.fit_transform(X)
+    H = nmf.components_
+
+    genes = np.asarray(genes)
+    cols = [f"metagene_{j}" for j in range(k)]
+    loadings = pd.DataFrame(H.T, index=genes, columns=cols)
+    spot_scores = pd.DataFrame(W, index=A.obs_names, columns=cols)
+    top_genes = {
+        j: list(genes[np.argsort(H[j])[::-1][:n_top]]) for j in range(k)
+    }
+    return {
+        "loadings": loadings,
+        "spot_scores": spot_scores,
+        "top_genes": top_genes,
+        "genes": list(genes),
+        "recon_err": float(nmf.reconstruction_err_),
+    }
+
+
+def compute_domain_pathways(
+    cell_type: str,
+    sources=("GO:BP", "REAC", "KEGG"),
+    min_genes: int = 15,
+    min_pts: float = 0.8,
+    min_logfc: float = 1.5,
+    organism: str = "hsapiens",
+):
+    """Functional enrichment of each spatial DOMAIN of a cell type -> a domain x pathway table.
+
+    A ct-SVG domain is a spatial partition of a cell type; its marker ct-SVGs
+    (compute_domain_ct_svgs) define a gene program. Running g:Profiler (sc.queries.enrich)
+    per domain turns each domain into a set of enriched pathways -- i.e. HyperSpot resolves a
+    cell type's spatial domains into distinct FUNCTIONAL units. This is an output the
+    regression-based ct-SVG methods (CELINA/STANCE) cannot produce: they yield genes-per-cell-type
+    with no spatial domains, hence no per-domain pathways.
+
+    Requires per-cell-type domains (compute_celltype_spatial_domains) and network access
+    (g:Profiler API). Domains with < `min_genes` ct-SVGs are skipped.
+
+    Returns a long DataFrame: [domain, n_genes, source, native, pathway, p_value, term_size].
+    """
+    import scanpy as sc
+
+    dom = compute_domain_ct_svgs(cell_type, min_pts=min_pts, min_logfc=min_logfc)
+    rows = []
+    for d, df in dom.items():
+        genes = list(df["names"]) if "names" in df.columns else list(df.index)
+        if len(genes) < min_genes:
+            continue
+        res = sc.queries.enrich(
+            genes, org=organism,
+            gprofiler_kwargs={"sources": list(sources), "no_evidences": True})
+        if not len(res):
+            continue
+        for _, r in res.iterrows():
+            rows.append((str(d), len(genes), r["source"], r["native"],
+                         r["name"], r["p_value"], r["term_size"]))
+    return pd.DataFrame(rows, columns=["domain", "n_genes", "source", "native",
+                                       "pathway", "p_value", "term_size"])
+
+
+def map_domains_to_subtypes(adata_ref, cell_type: str, subtype_col: str = "annotation",
+                            broad_col: str = "broad_type", min_cells: int = 80,
+                            drop=("Unknown", "Low quality"), max_per_subtype: int = 500,
+                            n_comps: int = 30, seed: int = 0):
+    """Validate that a cell type's spatial DOMAINS correspond to its scRNA SUBTYPES.
+
+    Transfers subtype labels from an annotated scRNA reference onto the decomposed ST cells of
+    `cell_type` (scanpy `ingest`: kNN label transfer in the reference's PCA space), then compares
+    the transferred subtypes to HyperSpot's domains. Domains are a *finer, spatial* partition, so
+    expect high homogeneity / low completeness for the raw domains; merging domains by their
+    dominant subtype should raise completeness -- evidence the domains are a coherent refinement of
+    real cell states.
+
+    adata_ref : scRNA reference AnnData with `broad_col` (cell type) and `subtype_col` (subtype).
+    Well-populated subtypes only (>= `min_cells`, excluding `drop`); the reference is subsampled to
+    <= `max_per_subtype` cells per subtype for speed/balance.
+
+    Returns a dict:
+      crosstab          -- DataFrame (domain x transferred-subtype) counts.
+      domain_to_subtype -- {domain: dominant subtype} (the merge map).
+      metrics           -- DataFrame [homogeneity, completeness, v_measure, ARI] for rows
+                           'domains' and 'merged_by_subtype'.
+      subtypes          -- the subtypes used.
+    """
+    import numpy as _np
+    from sklearn.metrics import (homogeneity_completeness_v_measure as _hcv,
+                                 adjusted_rand_score as _ari)
+
+    rng = _np.random.default_rng(seed)
+    ref = adata_ref[adata_ref.obs[broad_col] == cell_type].copy()
+    vc = ref.obs[subtype_col].value_counts()
+    keep = [s for s, n in vc.items() if n >= min_cells and s not in drop]
+    ref = ref[ref.obs[subtype_col].isin(keep)].copy()
+    # subsample per subtype for speed/balance
+    idx = []
+    for s in keep:
+        cells = _np.where(ref.obs[subtype_col].values == s)[0]
+        idx += list(rng.choice(cells, size=min(max_per_subtype, len(cells)), replace=False))
+    ref = ref[sorted(idx)].copy()
+    ref.obs["subtype"] = ref.obs[subtype_col].astype(str)
+
+    q = load_ct_spatial_data(cell_type)
+    q.obs["domain"] = q.obs["domain"].astype(str)
+    common = [g for g in ref.var_names if g in set(q.var_names)]
+    ref = ref[:, common].copy(); q = q[:, common].copy()
+    for a in (ref, q):
+        sc.pp.normalize_total(a, target_sum=1e4); sc.pp.log1p(a)
+    sc.pp.pca(ref, n_comps=min(n_comps, len(common) - 1, ref.n_obs - 1))
+    sc.pp.neighbors(ref); sc.tl.umap(ref)
+    sc.tl.ingest(q, ref, obs="subtype")
+
+    dom = q.obs["domain"].astype(str).values
+    sub = q.obs["subtype"].astype(str).values
+    ct = pd.crosstab(pd.Series(dom, name="domain"), pd.Series(sub, name="subtype"))
+    dommap = {d: ct.loc[d].idxmax() for d in ct.index}
+    merged = _np.array([dommap[d] for d in dom])
+    h, c, v = _hcv(sub, dom); hm, cm, vm = _hcv(sub, merged)
+    metrics = pd.DataFrame(
+        {"homogeneity": [h, hm], "completeness": [c, cm], "v_measure": [v, vm],
+         "ARI": [_ari(sub, dom), _ari(sub, merged)]},
+        index=["domains", "merged_by_subtype"])
+    return {"crosstab": ct, "domain_to_subtype": dommap, "metrics": metrics,
+            "subtypes": keep, "query": q}
+
+
+def domain_signature_pathways(pathways_df, per_domain: int = 3,
+                              term_size_max: int = 500, min_score: float = 2.0):
+    """Pick each domain's SIGNATURE pathways from a compute_domain_pathways() table.
+
+    Ranks pathways by a domain-specificity score = (this domain's -log10 p) minus the best
+    -log10 p over the *other* domains, so a pathway enriched everywhere (e.g. OXPHOS across all
+    RCC domains) is demoted and each domain surfaces what is distinctive to it.
+
+    Returns (signatures, score_matrix):
+      signatures   -- {domain: [(pathway, -log10 p), ...]} top `per_domain` domain-specific pathways.
+      score_matrix -- DataFrame (pathway x domain) of -log10 p (0 where absent), for heatmaps.
+    """
+    d = pathways_df[pathways_df["term_size"] <= term_size_max].copy()
+    d["score"] = -np.log10(d["p_value"])
+    M = d.pivot_table(index="pathway", columns="domain", values="score", fill_value=0.0)
+    signatures = {}
+    for dom in M.columns:
+        others = M.drop(columns=dom).max(axis=1)
+        spec = (M[dom] - others).sort_values(ascending=False)
+        signatures[dom] = [(p, round(float(M.loc[p, dom]), 1))
+                           for p in spec.head(per_domain).index if M.loc[p, dom] >= min_score]
+    return signatures, M
