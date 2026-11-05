@@ -45,25 +45,113 @@ def within_spot_max_deviation(X, spot_labels, sample=None, seed=0):
     return dev
 
 
+def within_spot_deviation_per_spot(X, spot_inv):
+    """Max abs within-spot deviation from each spot's first cell, PER spot.
+
+    Returns array `dev` indexed by spot id (the np.unique inverse ordering); dev[s] ~ 0
+    means spot s's cells are (near-)identical. Only multi-cell spots can exceed 0.
+    Unlike `within_spot_max_deviation` (a single global max), this keeps a per-spot
+    value so the dedup guard can decide spot-by-spot instead of all-or-nothing.
+    """
+    n = len(spot_inv)
+    n_spots = int(spot_inv.max()) + 1 if n else 0
+    dev = np.zeros(n_spots)
+    if n == 0:
+        return dev
+    if not sp.issparse(X):                               # dense (e.g. narrow embedding): vectorised
+        Xd = np.asarray(X)
+        rep = pd.Series(np.arange(n)).groupby(spot_inv).first().sort_index().to_numpy()
+        d = np.abs(Xd - Xd[rep[spot_inv]]).max(axis=1)  # per-cell dev from its spot's rep
+        np.maximum.at(dev, spot_inv, d)                 # reduce to per-spot max
+        return dev
+    order = np.argsort(spot_inv, kind='stable')          # sparse/wide: group-wise, low peak mem
+    ss = spot_inv[order]
+    uniq, starts, counts = np.unique(ss, return_index=True, return_counts=True)
+    for u, st, c in zip(uniq, starts, counts):
+        if c < 2:
+            continue
+        Xm = np.asarray(X[order[st:st + c]].todense())
+        dev[u] = float(np.abs(Xm - Xm[0]).max())
+    return dev
+
+
 def guarded_spot_reps(X, spot_labels, dedup=True, tol=1e-3, sample=None):
-    """(rep_idx, inv) collapsing same-spot cells to one representative -- but ONLY
-    when they are (near-)identical (max within-spot deviation < tol). Otherwise, or
-    when dedup=False / no spot labels, returns the identity mapping (every cell its
-    own unit). rep_idx[r] is a representative cell of unique spot r; inv[c] is the
-    unit id of cell c (labels[inv] broadcasts unit labels back to cells).
+    """(rep_idx, inv) collapsing same-spot cells to one representative -- PER SPOT:
+    a spot is collapsed only when its own cells are (near-)identical (within-spot
+    deviation < tol); spots with genuine within-spot variation keep all their cells.
+
+    This is robust to a few anomalous spots: with the old global-max gate, a SINGLE
+    outlier spot (e.g. one spot whose same-CT cells embed differently) disabled dedup
+    for the entire cell type, letting Leiden shatter the remaining distance-0 duplicate
+    cliques (observed on breast: Invasive_Tumor 256 domains, Macrophages_1 66, vs 9-14
+    for the deduped cell types). Now that one spot's cells are simply kept un-collapsed.
+
+    dedup=False / no spot labels -> identity mapping (every cell its own unit). rep_idx[r]
+    is a representative cell of unit r; inv[c] is the unit id of cell c (labels[inv]
+    broadcasts unit labels back to cells).
     """
     n = X.shape[0]                                      # one unit per cell (row of X)
     inv = np.arange(n)                                  # identity: no dedup
     if dedup and n > 0 and spot_labels is not None:
-        _, cand = np.unique(np.asarray(spot_labels), return_inverse=True)
+        _, cand = np.unique(np.asarray(spot_labels), return_inverse=True)  # cand[c] = spot id
+        # cheap global pre-check (honours `sample`): common case is ALL spots identical
+        # -> collapse every spot, same fast path as before.
         if within_spot_max_deviation(X, spot_labels, sample=sample) < tol:
             inv = cand
+        else:
+            # some spot genuinely varies: full per-spot check, collapse only the
+            # (near-)identical spots; divergent spots' cells stay as individual units.
+            dev = within_spot_deviation_per_spot(X, cand)
+            mask = (dev < tol)[cand]                     # cells whose spot is collapsible
+            inv = np.arange(n)
+            inv[mask] = n + cand[mask]                   # shared per-spot unit ids (disjoint from singletons)
+            _, inv = np.unique(inv, return_inverse=True)  # make unit ids contiguous
     rep_idx = pd.Series(np.arange(n)).groupby(inv).first().sort_index().to_numpy()
     return rep_idx, inv
 # -------------------------------------------------------------------------------
 
 def save_orig_st_data(adata_st):
     adata_st.write_h5ad(ProjectMetadata().project_folder / 'ST_orig.h5ad')
+
+def var_symbols(adata):
+    """Human-readable gene symbols as a Series indexed by ``adata.var_names``.
+
+    This is the SINGLE point at which the generic pipeline/visualization code learns
+    how to label genes, and the only place in generic code that knows about the
+    legacy ``'SYMBOL'`` column. Behaviour:
+
+    * if a ``var['SYMBOL']`` column exists -> use it (ENSG-keyed data, e.g. the kidney
+      10x CellRanger schema, carries symbols in this sidecar column);
+    * otherwise -> fall back to ``var_names`` (symbol-keyed data, e.g. the breast ST
+      reference, needs no sidecar: the symbols ARE the var_names).
+
+    Keeping every generic SYMBOL access routed through here makes the library
+    dataset-agnostic (option A) and is the designated migration point to option B:
+    once no dataset carries a ``'SYMBOL'`` column (kidney var_names renamed to symbols
+    via preprocessing.kidneycancer), this function collapses to ``return
+    pd.Series(adata.var_names.astype(str), index=adata.var_names)`` with no change to
+    any call site.
+    """
+    if "SYMBOL" in adata.var.columns:
+        return adata.var["SYMBOL"].astype(str)
+    return pd.Series(np.asarray(adata.var_names, dtype=str), index=adata.var_names)
+
+
+def spatial_shape(adata):
+    """squidpy spot `shape` appropriate to the platform, dataset-agnostically.
+
+    This is the DEFAULT resolver used when a plotting function is called with ``shape="auto"``; callers can
+    always override by passing an explicit ``shape`` ("circle"/"square"/"hex"/None).
+
+    Spots are circular capture features on every platform (Visium 55um, original ST 100um); the grid
+    arrangement (hex vs square) drives neighbour counts, not the marker. So the physically accurate, uniform
+    default is a circle wherever an H&E is registered, and a plain point scatter where none is:
+
+    * ``uns['spatial']`` present (image registered) -> ``"circle"`` (overlays the H&E);
+    * no ``uns['spatial']`` -> ``None`` (plain ``obsm['spatial']`` scatter, points only).
+    """
+    return "circle" if "spatial" in adata.uns else None
+
 
 def load_orig_st_data():
     adata_st = sc.read_h5ad(ProjectMetadata().project_folder / 'ST_orig.h5ad')

@@ -37,6 +37,8 @@ class HyperSpotClustering(object):
         n_pca_components: int = 50,
         n_clusters: int = 20,
         n_neighbors: int = 15,
+        resolution: float = 1,
+        target_k: int = None,
         dedup_spots: bool = True,    # same-spot same-CT cells are exact duplicates: cluster unique spots, broadcast
         min_cluster_size: int = 3,
         select_pcs: bool = False,
@@ -114,7 +116,7 @@ class HyperSpotClustering(object):
             gmm_feasible = True
 
             if algorithm == "leiden":
-                rep_labels = self.__leiden_labels(Xrep, n_neighbors, seed, use_gauss_neighbors)
+                rep_labels = self.__leiden_labels(Xrep, n_neighbors, seed, use_gauss_neighbors, resolution)
                 merge_mode = "connectivity"
             elif algorithm == "agglomerative":
                 k = min(max_k, n_rep)
@@ -135,10 +137,10 @@ class HyperSpotClustering(object):
             # merge sub-threshold domains on all cells (light safety net: min_cluster_pct
             # off by default, so only the absolute size floor applies). GMM only if BIC
             # couldn't already satisfy the floor.
-            if algorithm != "gmm" or not gmm_feasible:
+            if algorithm != "gmm" or not gmm_feasible or target_k is not None:
                 self.__merge_clusters(adata, threshold=eff_thresh,
                                       embedding_key=cluster_key, label_key="domain",
-                                      merge_mode=merge_mode)
+                                      merge_mode=merge_mode, target_k=target_k)
         return "domain"
 
     def __spot_reps(self, adata, cluster_key, dedup_spots=True, dup_tol=1e-3):
@@ -169,7 +171,7 @@ class HyperSpotClustering(object):
         return guarded_spot_reps(np.asarray(adata.obsm[cluster_key]), spots,
                                  dedup=dedup_spots, tol=dup_tol)
 
-    def __leiden_labels(self, X, n_neighbors, seed, use_gauss_neighbors):
+    def __leiden_labels(self, X, n_neighbors, seed, use_gauss_neighbors, resolution=1):
         """Leiden labels for embedding rows X (already deduped)."""
         rep = ad.AnnData(np.zeros((len(X), 1), dtype=np.float32))
         rep.obsm['_rep'] = np.asarray(X)
@@ -180,7 +182,7 @@ class HyperSpotClustering(object):
             sc.pp.neighbors(rep, n_neighbors=k, use_rep='_rep', metric='euclidean', knn=False, method='gauss')
         else:
             sc.pp.neighbors(rep, n_neighbors=k, use_rep='_rep', metric='euclidean', knn=True, method='umap')
-        sc.tl.leiden(rep, flavor="igraph", n_iterations=-1, resolution=1, key_added="domain",
+        sc.tl.leiden(rep, flavor="igraph", n_iterations=-1, resolution=resolution, key_added="domain",
                      random_state=seed)
         return rep.obs['domain'].to_numpy()
 
@@ -388,14 +390,19 @@ class HyperSpotClustering(object):
     def __merge_clusters(self, adata_ct, threshold=0.05,
                          embedding_key="embedding",
                          label_key="domain",
-                         merge_mode="connectivity"):
+                         merge_mode="connectivity",
+                         target_k=None):
         embedding = adata_ct.obsm[embedding_key]
         labels = adata_ct.obs[label_key].astype(str).copy()
         connectivities = adata_ct.obsp.get('connectivities')
 
         while labels.nunique() > 1:          # never merge below a single cluster
             cluster_ratio = labels.value_counts() / len(labels)
-            if not (cluster_ratio < threshold).any():
+            # merge while any cluster is sub-threshold OR (target_k set) while above the target count:
+            # each step dissolves the SMALLEST cluster into its nearest/most-connected neighbour.
+            need_thresh = bool((cluster_ratio < threshold).any())
+            need_k = target_k is not None and labels.nunique() > target_k
+            if not need_thresh and not need_k:
                 break
 
             smallest = cluster_ratio.idxmin()

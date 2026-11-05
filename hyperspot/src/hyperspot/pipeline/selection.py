@@ -222,7 +222,8 @@ def _compute_spatial_de_table(
     # excludes singleton domains from being tested (they stay in the one-vs-rest
     # background) and prevents scanpy from touching any 0-cell category.
     sc.tl.rank_genes_groups(adata, groupby=key, groups=list(testable),
-                            method='wilcoxon', pts=True, use_raw=False)
+                            method='wilcoxon', corr_method='benjamini-hochberg',
+                            pts=True, use_raw=False)
     rg = adata.uns['rank_genes_groups']
 
     if method == 'kruskal':
@@ -620,7 +621,7 @@ def compute_ct_domain_svg_scores(
     for ct in project_metadata.ct_list:
         adata_ct = load_ct_spatial_data(ct)
         sc.tl.rank_genes_groups(adata_ct, groupby=key, method='wilcoxon',
-                                pts=True, use_raw=True)
+                                corr_method='benjamini-hochberg', pts=True, use_raw=True)
         rg = adata_ct.uns['rank_genes_groups']
         all_domains = _run_wilcoxon_per_domain(adata_ct, key, rg)
 
@@ -864,10 +865,13 @@ def map_domains_to_subtypes(adata_ref, cell_type: str, subtype_col: str = "annot
 
     q = load_ct_spatial_data(cell_type)
     q.obs["domain"] = q.obs["domain"].astype(str)
+    # The query (ct_spatial_data) is ALREADY CPM(1e6)+log1p from make_ct_spatial_data, normalized over
+    # its full gene panel. Put the raw-counts reference on the SAME scale (CPM 1e6 + log1p) over its own
+    # full panel, THEN subset both to shared genes. Do NOT re-normalize the query: running normalize_total
+    # + log1p on already-log-normalized data double-normalizes it and corrupts the ingest PCA projection.
+    sc.pp.normalize_total(ref, target_sum=1e6); sc.pp.log1p(ref)
     common = [g for g in ref.var_names if g in set(q.var_names)]
     ref = ref[:, common].copy(); q = q[:, common].copy()
-    for a in (ref, q):
-        sc.pp.normalize_total(a, target_sum=1e4); sc.pp.log1p(a)
     sc.pp.pca(ref, n_comps=min(n_comps, len(common) - 1, ref.n_obs - 1))
     sc.pp.neighbors(ref); sc.tl.umap(ref)
     sc.tl.ingest(q, ref, obs="subtype")

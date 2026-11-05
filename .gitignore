@@ -4,6 +4,7 @@ scRNA ref checkpoints/
 ST checkpoints/
 spatialscope_output/
 demo/*/
+references/
 *.pth
 
 # Byte-compiled / optimized / DLL files
