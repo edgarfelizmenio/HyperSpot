@@ -327,39 +327,3 @@ class CTHGCAEv6Embedder(HypergraphEmbedder):
     @classmethod
     def checkpoint_name(cls) -> str:
         return "CTHGCAEv6Embedder"
-
-    def get_attribution_forward(self, index=0):
-        def attribution_forward(feats, cell_types, incidence_matrix):
-            return self.model(feats, cell_types, incidence_matrix)[index]
-        return attribution_forward
-
-    def get_attribution_inputs(self, batch):
-        inputs = batch.batch_cell_feats
-        additional_forward_args = (batch.batch_cell_types, batch.batch_incidence_matrix)
-        return inputs, additional_forward_args
-
-    def get_e2e_attribution_forward(self, classifier, index=0, num_repeats=1):
-        class ExplainerClassifier(nn.Module):
-            def __init__(self, embedder, classifier, index):
-                super().__init__()
-                self.embedder = embedder.model
-                self.classifier = classifier
-                self.index = index
-                self.num_repeats = num_repeats
-
-            def forward(self, feats, cell_types, incidence_matrix, batch_size):
-                embedding = self.embedder(feats, cell_types, incidence_matrix)[self.index]
-                num_samples = embedding.shape[0] // self.num_repeats
-                num_cols = embedding.shape[1]
-                embedding = embedding.view(self.num_repeats, num_samples, num_cols)
-                embedding = embedding[:, :batch_size, :]
-                embedding = embedding.reshape(self.num_repeats * batch_size, num_cols)
-                return self.classifier(embedding)
-
-        return ExplainerClassifier(self, classifier, index)
-
-    def get_e2e_attribution_inputs(self, batch):
-        inputs, additional_forward_args = self.get_attribution_inputs(batch)
-        cell_types, incidence_matrix = additional_forward_args
-        batch_size = batch.sample_n_cells
-        return inputs, (cell_types, incidence_matrix, batch_size)

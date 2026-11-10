@@ -6,7 +6,7 @@ import torch.nn as nn
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from enum import Enum
-from typing import Dict, Optional, Callable, Tuple
+from typing import Dict, Optional
 
 from pathlib import Path
 
@@ -75,21 +75,6 @@ class HypergraphEmbedder(nn.Module, ABC):
     def checkpoint_name(cls) -> str:
         pass
     
-    @abstractmethod
-    def get_attribution_forward(self, index = 0) -> Callable[..., torch.Tensor]:
-        raise NotImplementedError
-
-    @abstractmethod
-    def get_attribution_inputs(self, batch) -> Tuple[torch.Tensor, tuple]:
-        raise NotImplementedError
-
-    @abstractmethod
-    def get_e2e_attribution_forward(self, classifier, index = 0):
-        raise NotImplementedError
-    
-    @abstractmethod
-    def get_e2e_attribution_inputs(self, batch):
-        raise NotImplementedError
 
 # --- registry -----------------------------------------------------------------
 # Each embedder module registers itself on import (@HypergraphEmbedder.register).
