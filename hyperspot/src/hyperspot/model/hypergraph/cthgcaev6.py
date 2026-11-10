@@ -3,7 +3,27 @@ import torch.nn as nn
 
 from . import HypergraphEmbedder, HypergraphEmbedderArgs
 from ..moduledict import LinearDict
-from .cthgcaev3 import HyperedgeDecoder
+
+
+class HyperedgeDecoder(nn.Module):
+    """Decode a hyperedge embedding back to its spot-basis pseudobulk target.
+
+    Hyperedges are not cell-type-specific, so this is a plain shared MLP
+    (embedding_dim → output_dim = small global HVG count). Used to give the
+    otherwise-unsupervised hyperedge embeddings a direct reconstruction signal.
+    """
+
+    def __init__(self, embedding_dim, output_dim, dropout=0.0, act=nn.PReLU):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(embedding_dim, embedding_dim),
+            act(),
+            nn.Dropout(dropout),
+            nn.Linear(embedding_dim, output_dim),
+        )
+
+    def forward(self, hyperedge_embeddings):
+        return self.net(hyperedge_embeddings)
 
 
 def _norms(H):

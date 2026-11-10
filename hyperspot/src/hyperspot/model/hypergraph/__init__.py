@@ -91,17 +91,15 @@ class HypergraphEmbedder(nn.Module, ABC):
     def get_e2e_attribution_inputs(self, batch):
         raise NotImplementedError
 
-from .fusion import SpatialFusionEmbedder
-from .hgnn import HyFiEmbedder
-from .transformer import HGTransformerEmbedder
-from .cthgnn import CTHyFiEmbedder
-from .cthgcae import CTHGCAEEmbedder
-from .cthgcaev2 import CTHGCAEv2Embedder
-from .cthgcaev3 import CTHGCAEv3Embedder
-from .cthgcaev4 import CTHGCAEv4Embedder
-from .cthgcaev5 import CTHGCAEv5Embedder
-from .cthgcaev6 import CTHGCAEv6Embedder
-from .cthgcaev7 import CTHGCAEv7Embedder
-from .cthgat import CTHGATEmbedder
-from .cthgatv2 import CTGATv2Embedder
-from .cthgconv import CTHGConvEmbedder
+# --- registry -----------------------------------------------------------------
+# Each embedder module registers itself on import (@HypergraphEmbedder.register).
+from .cthgcaev6 import CTHGCAEv6Embedder  # noqa: E402,F401
+
+# Optional hook: a local `_local_embedders.py` (not part of the package) may import
+# additional embedder modules so they register too.
+import importlib as _importlib  # noqa: E402
+try:
+    _importlib.import_module(f"{__name__}._local_embedders")
+except ModuleNotFoundError as e:
+    if e.name != f"{__name__}._local_embedders":
+        raise

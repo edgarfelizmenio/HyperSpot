@@ -15,11 +15,7 @@ HyperSpot: Detection of Cell Type-Specific Spatially Variable Gene Modules using
 - **`cli.py`**: `ClusterArgs` gains `n_pca_components: int = 50` CLI parameter
 
 #### Refactoring
-- **`model/hypergraph/cthgnn.py`**: `CTHyFiHGNNv1` `n_cell_types` is now a constructor parameter (replaces hardcoded 12 in `LinearDict` and `ParameterDict`); node input dropout disabled
-- **`model/hypergraph/cthgcae.py`**: `CTHGCAE` accepts and forwards `n_cell_types` to both encoder and decoder
-- **`model/hypergraph/cthgcaev2.py`**: `CTHGCAEv2` forwards `num_cell_types` to encoder; `CTHGCAEv2Embedder` uses `n_cell_types` from pipeline (removed try/except fallback to 12)
 - **`model/hypergraph/__init__.py`**: `HypergraphEmbedder.build(args, n_cell_types)` takes `n_cell_types` explicitly from pipeline and passes to all `_build_impl` implementations
-- **`model/hypergraph/hgnn.py`, `fusion.py`, `ctfusion.py`, `transformer.py`**: `_build_impl` signatures updated to accept `n_cell_types` for interface consistency
 - **`pipeline/embedder.py`**: `__setup_model` reads `ProjectMetadata().n_cell_types` and passes to `build()`; hardcoded `n_classes=12` in `fit()` replaced with `project_metadata.n_cell_types`
 - **`pipeline/explainer.py`**: `HypergraphEmbedder.build` call updated to pass `project_metadata.n_cell_types`
 
