@@ -88,14 +88,21 @@ class CTClusterArgs:                # cell-type domains
     min_cluster_pct: float = -1     # min fraction of the cell type's CELLS per domain; OFF by default (dedup fixes the over-clustering it patched)
     dedup_spots: bool = True        # collapse same-spot same-CT duplicate cells before clustering (Spotiphy); guarded -> auto no-op on real per-cell variation. Set False for true-counts / per-cell data.
 
+# Command order in --help (sort_key), in steps of 10 so new commands slot in:
+#   10 init-project-files-dir   20 train-embedder   30 make-embedding
+#   40 compute-spatial-domains  50 compute-celltype-spatial-domains
+#   60 compute-svgs             70 compute-ct-svgs
+#   80 (reserved: ct-SVG scoring)  90 (reserved: run-all)
+#  100 perform-model-evaluation
+# 1000 folder-test (always last)
 @app.command(help="Create a project files directory.",
-             sort_key=1)
+             sort_key=10)
 def init_project_files_dir():
     if not config.project_files_dir.exists():
         config.project_files_dir.mkdir()
 
 @app.command(help="Fit a hypergraph model for making embeddings.",
-             sort_key=2)
+             sort_key=20)
 def train_embedder(
     project: ProjectArgs,
     common: CommonArgs = CommonArgs(),
@@ -125,7 +132,7 @@ def train_embedder(
     )
 
 @app.command(help="Use the trained hypergraph model to generate the embeddings.",
-             sort_key=3)
+             sort_key=30)
 def make_embedding(
     project: ProjectArgs,
     K: Annotated[float, Parameter(help="Fraction of neighborhood hyperedges kept per hop at inference (fan-out cap, avoids OOM). 1.0 = full neighborhood (deterministic, reproduces training-time embeddings).")] = 0.7,
@@ -152,7 +159,7 @@ def make_embedding(
                                 K=K, M=M)
 
 @app.command(help="Using hyperedge embeddings, find the spatial domains present in the Spatial Transcriptomics tissue.",
-             sort_key=4)
+             sort_key=40)
 def compute_spatial_domains(
     project: ProjectArgs,            
     clustering: ClusterArgs = ClusterArgs(),
@@ -174,7 +181,7 @@ def compute_spatial_domains(
     )
 
 @app.command(help="Using hypergraph node embeddings, find the spatial domains present for each cell type in the Spatial Transcriptomics tissue.",
-            sort_key=5)
+            sort_key=50)
 def compute_celltype_spatial_domains(
     project: ProjectArgs,
     ct_clustering: CTClusterArgs = CTClusterArgs(),
@@ -191,7 +198,7 @@ def compute_celltype_spatial_domains(
     )
 
 @app.command(help="Detect tissue-level spatially variable genes (SVGs) for the ST spatial domains -> svgs_ST.csv. Requires spatial domains first (compute-spatial-domains).",
-             sort_key=8)
+             sort_key=60)
 def compute_svgs(
     project: ProjectArgs,
     key: Annotated[str, Parameter(help="obs column holding the domain labels.")] = 'domain',
@@ -212,7 +219,7 @@ def compute_svgs(
 
 @app.command(
     help="Detect cell-type-specific SVGs (ctSVGs): domain-marker genes per cell type -> svgs_ct_<ct>.csv. Default: all cell types; --cell-types limits to a subset. Requires per-CT domains first (compute-celltype-spatial-domains).",         
-    sort_key=9)
+    sort_key=70)
 def compute_ct_svgs(
     project: ProjectArgs,
     cell_types: Annotated[Optional[List[str]], Parameter(help="Restrict ctSVG detection to these cell types (default: all).")] = None,
@@ -235,7 +242,7 @@ def compute_ct_svgs(
         create_svg_list(ct_svgs, rank_by=rank_by).to_csv(out / f"svgs_ct_{ct}.csv")
         logger.info(f"ctSVGs [{ct}] -> {out / ('svgs_ct_' + ct + '.csv')}")
 
-@app.command(help="Run evaluation test.", sort_key=6)
+@app.command(help="Run evaluation test.", sort_key=100)
 def perform_model_evaluation(
     project: ProjectArgs,         
     num_epochs: Annotated[int, Parameter(help="Training epochs.")] = 1000,
@@ -267,7 +274,7 @@ def perform_model_evaluation(
     )
 
 @app.command(help="Check if project folder exists.",
-             sort_key=7)
+             sort_key=1000)   # always last
 def folder_test(project: ProjectArgs):
     if project.project_dir.exists():
         print(f"Folder {project.project_dir} exists!")
