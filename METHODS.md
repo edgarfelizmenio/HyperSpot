@@ -2,7 +2,7 @@
 
 ## Biological Target
 
-HyperSpot detects **cell-type-specific domain marker SVGs** — genes that distinguish spatial domains within a cell type. This is a biologically distinct subcategory of ctSVGs:
+HyperSpot detects **per-cell-type spatial domain marker SVGs** — genes that distinguish spatial domains within a cell type. This is a biologically distinct subcategory of ctSVGs:
 
 - **ctSVG** (oracle definition): any gene with spatial autocorrelation within a cell type (Moran's I / R² based)
 - **Domain marker ctSVG** (HyperSpot): a gene that marks a specific spatial domain within a cell type (Wilcoxon DE between domains)

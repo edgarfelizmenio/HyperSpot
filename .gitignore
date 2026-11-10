@@ -5,7 +5,9 @@ ST checkpoints/
 spatialscope_output/
 demo/*/
 references/
+METHODS.md
 *.pth
+
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
