@@ -22,22 +22,15 @@ _hs_logger.setLevel(os.environ.get("HYPERSPOT_LOG_LEVEL", "INFO").upper())
 _hs_logger.propagate = False
 logger = logging.getLogger(__name__)
 
-import cyclopts
-import numpy as np
-import scanpy as sc
-import torch
-
 from cyclopts import App, Parameter
-from dataclasses import dataclass, astuple
+from dataclasses import dataclass
 from typing import Optional, Annotated, List
 
 from pathlib import Path
-from tqdm.auto import tqdm
 
 from . import config, utils
 
 from .data import STHypergraphData
-from .dataset.hypergraph import STHypergraphListDataset
 
 from .metadata import ProjectMetadata
 
