@@ -59,7 +59,7 @@ class HypergraphEmbedderDriver(object):
 
         self.__setup_model(embedder_args,
                            accelerator)
-        self.criterion = HGCTCAELoss(rho=1.0, optimize_hyperedges=True)
+        self.criterion = HGCTCAELoss()
         self.__configure_optimizer(num_epochs)
         self.criterion.to(self.device)
         
@@ -138,26 +138,18 @@ class HypergraphEmbedderDriver(object):
         batch = batch.to_device(self.device)        
 
         if self.model.training:
-            (node_embeddings,
-             hyperedge_embeddings,
-             reconstruction,
-             hyperedge_reconstruction, 
-             _) = self.model(batch)
+            _, _, reconstruction, hyperedge_reconstruction, _ = self.model(batch)
 
+            n_c = batch.neighborhood_n_cells
             n_h = batch.neighborhood_n_hyperedges
-            contrastive_loss, node_total, hyperedge_total = self.criterion(
-                                              batch.batch_cell_feats[:batch.neighborhood_n_cells],
-                                              reconstruction[:batch.neighborhood_n_cells],
-                                              node_embeddings[:batch.neighborhood_n_cells],
-                                              batch.neighborhood_incidence_matrix,
-                                              batch.batch_cell_types[:batch.neighborhood_n_cells],
-                                              batch.sample_n_cells,
-                                              batch.sample_n_hyperedges,
-                                              hyperedge_embeddings=hyperedge_embeddings[:n_h],
-                                              hyperedge_recon=hyperedge_reconstruction[:n_h],
-                                              hyperedge_feats=batch.batch_hyperedge_feats[:n_h])
+            loss, node_total, hyperedge_total = self.criterion(
+                orig_feats=batch.batch_cell_feats[:n_c],
+                recon_feats=reconstruction[:n_c],
+                classes=batch.batch_cell_types[:n_c],
+                hyperedge_recon=hyperedge_reconstruction[:n_h],
+                hyperedge_feats=batch.batch_hyperedge_feats[:n_h])
 
-            return contrastive_loss, node_total, hyperedge_total
+            return loss, node_total, hyperedge_total
         
         else:
             node_embeddings, hyperedge_embeddings, _, _, un = self.model(batch)
