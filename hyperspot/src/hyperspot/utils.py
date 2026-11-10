@@ -1,3 +1,5 @@
+import random
+
 import scanpy as sc
 import torch
 import numpy as np
@@ -7,6 +9,23 @@ import scipy.sparse as sp
 from pathlib import Path
 
 from .metadata import ProjectMetadata
+
+
+def set_seed(seed: int = 42):
+    """Seed every RNG HyperSpot uses (python, numpy, torch CPU/CUDA) and make cuDNN deterministic.
+
+    Seeding happens once at the entry point, not inside library functions: each CLI
+    command seeds at program start, and run_eval seeds at the start of every run
+    (train -> embed -> cluster -> score). In notebooks / the Python API, call this once
+    before running the pipeline steps; results then depend only on the seed and the
+    order of the steps. Leiden clustering takes its own `seed` argument separately.
+    """
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
 
 # --- spot-duplicate primitives (single source of truth) ------------------------

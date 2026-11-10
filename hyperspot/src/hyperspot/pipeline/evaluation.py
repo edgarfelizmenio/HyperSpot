@@ -12,10 +12,12 @@ from ..metadata import ProjectMetadata
 from ..model.hypergraph import HypergraphEmbedderArgs
 
 from ..utils import (
-    load_decomposed_st_data, 
+    load_decomposed_st_data,
     load_orig_st_data,
     load_aggr_st_data,
     load_ct_spatial_data,
+    var_symbols,
+    set_seed,
 )
 
 from . import (
@@ -28,6 +30,7 @@ from . import (
 
 def HyperSpot_eval_pipeline(
     run_number: int,
+    hypergraph: STHypergraphData,
     args: HypergraphEmbedderArgs,
     num_epochs,
     batch_size,
@@ -38,13 +41,14 @@ def HyperSpot_eval_pipeline(
     copy_var_cols=None,
     seed: int = 0,
     n_pca_components: int = 50,
-    reg_kwargs=None,
 ):
+
+    # one seed per pipeline run (train -> embed -> cluster -> score): run_i depends only on its seed
+    set_seed(seed)
 
     project_metadata = ProjectMetadata()
 
     # representation learning
-    hypergraph = STHypergraphData.load()
     embedder = HypergraphEmbedderDriver()
     embedder.fit(
         hypergraph,
@@ -52,8 +56,6 @@ def HyperSpot_eval_pipeline(
         num_epochs,
         batch_size,
         accelerator,
-        seed=seed,
-        **(reg_kwargs or {}),   # regularizers / hyperedge branch (matches train-embedder)
     )
     embedder.generate_embedding(hypergraph,
                                 args,
@@ -107,6 +109,7 @@ def HyperSpot_eval_pipeline(
 EVAL_SEEDS = [42, 271, 314, 711, 1337, 1618, 1729, 2026, 3407, 9001]
 
 def run_eval(
+    hypergraph: STHypergraphData,
     args: HypergraphEmbedderArgs,
     num_epochs,
     batch_size,
@@ -116,7 +119,6 @@ def run_eval(
     min_cluster_pct=-1,
     n_pca_components=50,
     n=len(EVAL_SEEDS),
-    reg_kwargs=None,
 ):
 
     n = min(n, len(EVAL_SEEDS))
@@ -152,6 +154,7 @@ def run_eval(
         seed = EVAL_SEEDS[run_number]
         HyperSpot_eval_pipeline(
             run_number,
+            hypergraph,
             args,
             num_epochs,
             batch_size,
@@ -161,7 +164,6 @@ def run_eval(
             min_cluster_pct=min_cluster_pct,
             seed=seed,
             n_pca_components=n_pca_components,
-            reg_kwargs=reg_kwargs,
         )
 
 class ClusterEvaluation(object):

@@ -36,3 +36,18 @@ Install in editable mode using pip:
   ```bash
   pip install -e hyperspot
   ```
+
+## Reproducibility
+
+HyperSpot seeds its random number generators once, at the entry point, never inside library functions
+(`hyperspot.utils.set_seed` seeds python, numpy, torch CPU/CUDA and makes cuDNN deterministic).
+
+- **CLI:** every command is a separate program and seeds itself at startup (default seed 42).
+- **`perform-model-evaluation`:** each run reseeds with its own fixed seed before
+  train → embed → cluster → score, so run *i* depends only on its seed (also when resumed).
+- **Notebooks / Python API:** call `set_seed(seed)` once before running the pipeline steps, and keep the
+  same step order. Without it, `HypergraphEmbedderDriver.fit` (initialisation, batch order) and
+  `generate_embedding` (K/M neighbourhood sampling) are not reproducible.
+- Leiden clustering takes its own `seed` argument (default 42).
+
+Bitwise reproducibility also assumes the same GPU, library versions and batch size.

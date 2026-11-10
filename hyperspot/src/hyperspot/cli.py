@@ -20,7 +20,7 @@ from typing import Optional, Annotated, List, Literal
 from pathlib import Path
 from tqdm.auto import tqdm
 
-from . import config
+from . import config, utils
 
 from .data import STHypergraphData
 from .dataset.hypergraph import STHypergraphListDataset
@@ -48,40 +48,22 @@ class ProjectArgs:
     def project_dir(self):
         return config.project_files_dir / self.name
 
+@Parameter(name="*")
+@dataclass
+class CommonArgs:
+    seed: Annotated[int, Parameter(help="Seed for reproducibility")] = 42
+
 @dataclass
 class EmbedderCLIArgs:
-    model_name: Annotated[str, Parameter(help=f"Name of hypergraph embedder to use. Possible values: {HypergraphEmbedderDriver.get_available_embedders()}")]
-    input_dim: Annotated[int, Parameter(help="Number of input features.")]
-    embedding_dim: Annotated[int, Parameter(help="Size of embedding.")]
-    dropout: Annotated[Optional[float], Parameter(help="Dropout parameter.")] = 0.1
-    latent_dim: Annotated[Optional[int], Parameter(help="Size of hidden embedding (for transformer and fusion embedders only).")] = None
-    num_heads: Annotated[Optional[int], Parameter(help="Number of attention heads (for transformers only).")] = None
-    num_blocks: Annotated[Optional[int], Parameter(help="Number of transformer blocks (for transformers only).")] = None
-    num_hyperedges: Annotated[Optional[int], Parameter(help="Number of hyperedges (for transformers only).")] = None
-    hyperedge_feats: Annotated[Optional[str], Parameter(help="Initial value of hyperedge features (for transformers only).")] = None
-    hyperedge_pool: Annotated[str, Parameter(help="Pooling for the opt-in hyperedge branch: 'spot' (own-spot cells only, sharper) or 'neighborhood' (spot + neighbors, smoother).")] = "spot"
+    model_name: Annotated[str, Parameter(help=f"Name of hypergraph embedder to use. Possible values: {HypergraphEmbedderDriver.get_available_embedders()}")] = "CTHGCAEv6Embedder"
+    embedding_dim: Annotated[int, Parameter(help="Size of embedding.")] = 20
+    dropout: Annotated[float, Parameter(help="Dropout parameter.")] = 0.2
 
 @dataclass
 class TrainerArgs:
-    num_epochs: int = 100
+    num_epochs: int = 1000
     batch_size: int = 8192
     accelerator: config.AcceleratorOptions = config.AcceleratorOptions.CUDA
-    seed: int = 42
-
-@dataclass
-class RegularizerArgs:
-    """Opt-in, per-cell-type training regularizers (all default off)."""
-    lambda_var: Annotated[float, Parameter(help="Weight for per-cell-type variance (anti-collapse) regularizer.")] = 0.0
-    lambda_cov: Annotated[float, Parameter(help="Weight for per-cell-type covariance (decorrelation) regularizer.")] = 0.0
-    lambda_nbr: Annotated[float, Parameter(help="Weight for neighborhood contrastive regularizer.")] = 0.0
-    temp_nbr: Annotated[float, Parameter(help="Temperature for the neighborhood contrastive regularizer.")] = 0.5
-    edge_preserving: Annotated[bool, Parameter(help="Expression-gated (bilateral) neighborhood pull: smooths within regions but not across expression boundaries. Set False for the isotropic-blur ablation.")] = True
-    reg_weight: Annotated[float, Parameter(help="Weight for the model-side regularizer (e.g. v4 gate L1).")] = 0.0
-    optimize_hyperedges: Annotated[bool, Parameter(help="Enable the hyperedge autoencoder branch (reconstruct each spot's own pseudobulk + regularize hyperedge embeddings). Requires a hypergraph built with n_hyperedge_feats>0.")] = True
-    rho_h: Annotated[float, Parameter(help="Hyperedge reconstruction weight (only used when optimize_hyperedges).")] = 1.0
-    lambda_var_h: Annotated[float, Parameter(help="Variance (anti-collapse) weight on hyperedge embeddings.")] = 0.0
-    lambda_cov_h: Annotated[float, Parameter(help="Covariance (decorrelation) weight on hyperedge embeddings.")] = 0.0
-    lambda_nbr_h: Annotated[float, Parameter(help="Neighborhood-contrastive weight on hyperedge embeddings (positives = hyperedges sharing cells).")] = 0.0
 
 @dataclass
 class ClusterArgs:
@@ -91,7 +73,6 @@ class ClusterArgs:
     min_cluster_pct: float = -1     # fractional size floor OFF by default (dedup fixes the over-clustering it patched); absolute size floor below still applies
     min_cluster_size: int = 3       # absolute size floor: domain must have >= this many cells (< 3 is statistically insignificant)
     dedup_spots: bool = True        # collapse same-spot same-CT duplicate cells before clustering (Spotiphy); guarded -> auto no-op on real per-cell variation. Set False for true-counts / per-cell data.
-    seed: int = 42
     n_pca_components: int = 50
     n_clusters: int = 20          # agglomerative: over-segment before min_cluster_pct merge
     n_neighbors: int = 15         # leiden: base kNN; auto-bumped by per-spot cell count
@@ -108,79 +89,99 @@ def init_project_files_dir():
 
 @app.command(help="Fit a hypergraph model for making embeddings.",
              sort_key=2)
-def train_embedder(project: ProjectArgs,
-         model: EmbedderCLIArgs,
-         trainer: TrainerArgs,
-         regularizer: RegularizerArgs = RegularizerArgs()):
-
+def train_embedder(
+    project: ProjectArgs,
+    common: CommonArgs = CommonArgs(),
+    model: EmbedderCLIArgs = EmbedderCLIArgs(),
+    trainer: TrainerArgs = TrainerArgs(),
+):
     ProjectMetadata(project.project_dir)
+
+    utils.set_seed(common.seed)
     hypergraph = STHypergraphData.load()
 
     print("hyperedges: ", hypergraph["hyperedge_feats"].shape[0])
     print(vars(model))
     
     embedder = HypergraphEmbedderDriver()
+    args = HypergraphEmbedderArgs(
+        **vars(model),
+        input_dim = hypergraph["cell_feats"].shape[1]
+    )
     
-    embedder.fit(hypergraph,
-                 HypergraphEmbedderArgs(**vars(model)),
-                 trainer.num_epochs,
-                 trainer.batch_size,
-                 trainer.accelerator,
-                 seed=trainer.seed,
-                 lambda_var=regularizer.lambda_var,
-                 lambda_cov=regularizer.lambda_cov,
-                 lambda_nbr=regularizer.lambda_nbr,
-                 temp_nbr=regularizer.temp_nbr,
-                 edge_preserving=regularizer.edge_preserving,
-                 reg_weight=regularizer.reg_weight,
-                 optimize_hyperedges=regularizer.optimize_hyperedges,
-                 rho_h=regularizer.rho_h,
-                 lambda_var_h=regularizer.lambda_var_h,
-                 lambda_cov_h=regularizer.lambda_cov_h,
-                 lambda_nbr_h=regularizer.lambda_nbr_h)
+    embedder.fit(
+        hypergraph,
+        args,
+        trainer.num_epochs,
+        trainer.batch_size,
+        trainer.accelerator,
+    )
 
 @app.command(help="Use the trained hypergraph model to generate the embeddings.",
              sort_key=3)
-def make_embedding(project: ProjectArgs,
-                   model: EmbedderCLIArgs,
-                   trainer: TrainerArgs,
-                   K: Annotated[float, Parameter(help="Fraction of neighborhood hyperedges kept per hop at inference (fan-out cap, avoids OOM). 1.0 = full neighborhood (deterministic, reproduces training-time embeddings).")] = 0.7,
-                   M: Annotated[float, Parameter(help="Fraction of neighborhood cells kept per hyperedge expansion at inference (fan-out cap, avoids OOM). 1.0 = full neighborhood.")] = 0.7):
+def make_embedding(
+    project: ProjectArgs,
+    K: Annotated[float, Parameter(help="Fraction of neighborhood hyperedges kept per hop at inference (fan-out cap, avoids OOM). 1.0 = full neighborhood (deterministic, reproduces training-time embeddings).")] = 0.7,
+    M: Annotated[float, Parameter(help="Fraction of neighborhood cells kept per hyperedge expansion at inference (fan-out cap, avoids OOM). 1.0 = full neighborhood.")] = 0.7,
+    common: CommonArgs = CommonArgs(),
+    model: EmbedderCLIArgs = EmbedderCLIArgs(),
+    trainer: TrainerArgs = TrainerArgs(),
+):
 
     ProjectMetadata(project.project_dir)
-
+    utils.set_seed(common.seed)
+    
     hypergraph = STHypergraphData.load()
     embedder = HypergraphEmbedderDriver()
-
+    args = HypergraphEmbedderArgs(
+        **vars(model),
+        input_dim = hypergraph["cell_feats"].shape[1]
+    )
+    
     embedder.generate_embedding(hypergraph,
-                                HypergraphEmbedderArgs(**vars(model)),
+                                args,
                                 trainer.batch_size,
                                 trainer.accelerator,
                                 K=K, M=M)
 
 @app.command(help="Using hyperedge embeddings, find the spatial domains present in the Spatial Transcriptomics tissue.",
              sort_key=4)
-def compute_spatial_domains(project: ProjectArgs,
-                            clustering: ClusterArgs = ClusterArgs(),
-                            copy_var_cols: Annotated[Optional[List[str]], Parameter(help="var columns to copy from the decomposed AnnData into the aggregated AnnData.")] = None):
+def compute_spatial_domains(
+    project: ProjectArgs,            
+    clustering: ClusterArgs = ClusterArgs(),
+    copy_var_cols: Annotated[
+        Optional[List[str]], 
+        Parameter(help="var columns to copy from the decomposed AnnData into the aggregated AnnData.")] = None,
+    common: CommonArgs = CommonArgs(),
+):
 
     ProjectMetadata(project.project_dir)
-
+    utils.set_seed(common.seed)
+    
     clustering_driver = HyperSpotClustering()
     clustering_driver.create_aggr_st_data(var_cols=copy_var_cols)
     clustering_driver.load_embedding_to_aggr_data(clustering.embedding_key)
-    clustering_driver.compute_spatial_clusters(**vars(clustering))
+    clustering_driver.compute_spatial_clusters(
+        **vars(clustering),
+        seed=common.seed,
+    )
 
 @app.command(help="Using hypergraph node embeddings, find the spatial domains present for each cell type in the Spatial Transcriptomics tissue.",
             sort_key=5)
-def compute_celltype_spatial_domains(project: ProjectArgs,
-                                     clustering: ClusterArgs = ClusterArgs()):
-
+def compute_celltype_spatial_domains(
+    project: ProjectArgs,
+    clustering: ClusterArgs = ClusterArgs(),
+    common: CommonArgs = CommonArgs(),
+):
     ProjectMetadata(project.project_dir)
-
+    utils.set_seed(common.seed)
+    
     clustering_driver = HyperSpotClustering()
     clustering_driver.load_embedding_to_ct_spatial_data(clustering.embedding_key)
-    clustering_driver.compute_ct_spatial_clusters(**vars(clustering))
+    clustering_driver.compute_ct_spatial_clusters(
+        **vars(clustering),
+        seed = common.seed,
+    )
 
 @app.command(help="Detect tissue-level spatially variable genes (SVGs) for the ST spatial domains -> svgs_ST.csv. Requires spatial domains first (compute-spatial-domains).",
              sort_key=8)
@@ -229,17 +230,24 @@ def compute_ct_svgs(
 @app.command(help="Run evaluation test.", sort_key=6)
 def perform_model_evaluation(
     project: ProjectArgs,         
-    model: EmbedderCLIArgs,
-    trainer: TrainerArgs,
+    model: EmbedderCLIArgs = EmbedderCLIArgs(),
+    trainer: TrainerArgs = TrainerArgs(),
     clustering: ClusterArgs = ClusterArgs(),
-    regularizer: RegularizerArgs = RegularizerArgs(),
     num_runs: int = 10,
-    ):
+):
 
     ProjectMetadata(project.project_dir)
 
+    hypergraph = STHypergraphData.load()
+    
+    args = HypergraphEmbedderArgs(
+        **vars(model),
+        input_dim = hypergraph["cell_feats"].shape[1]
+    )
+    
     run_eval(
-        HypergraphEmbedderArgs(**vars(model)),
+        hypergraph,
+        args,
         trainer.num_epochs,
         trainer.batch_size,
         trainer.accelerator,
@@ -248,7 +256,6 @@ def perform_model_evaluation(
         min_cluster_pct=clustering.min_cluster_pct,
         n_pca_components=clustering.n_pca_components,
         n=num_runs,
-        reg_kwargs=vars(regularizer),
     )
 
 @app.command(help="Check if project folder exists.",

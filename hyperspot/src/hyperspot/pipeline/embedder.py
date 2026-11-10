@@ -1,14 +1,9 @@
 import copy
-import gc
-import os
 import torch
 import torch.optim as optim
 
 import logging
 
-from collections import namedtuple
-
-from pathlib import Path
 from tqdm import tqdm
 
 from torch.utils.data import DataLoader
@@ -22,13 +17,7 @@ from ..dataset.hypergraph import STHypergraphMatrixDataset, STHypergraphBatchMat
 from ..metadata import ProjectMetadata
 
 from ..model.hypergraph import HypergraphEmbedder, HypergraphEmbedderArgs
-from ..model.cl.hyfi import HyFi, HyFiAE
 from ..model.cl.hyperspotloss import HGCTCAELoss
-
-from ..utils import build_incidence_matrix
-
-
-# from ..model.cl.tricl import TriCL, TriCLLoss
 
 from ..config import AcceleratorOptions
 
@@ -36,9 +25,7 @@ logger = logging.getLogger(__name__)
 
 # save node embeddings and hyperedge embeddings
 class HypergraphEmbedderDriver(object):
-    def __init__(self,
-                 sigma=1):
-        
+    def __init__(self):
         logger.info("Initializing model...")
     
     def __setup_model(self,
@@ -49,78 +36,34 @@ class HypergraphEmbedderDriver(object):
 
         n_cell_types = ProjectMetadata().n_cell_types
         self.model = HypergraphEmbedder.build(args, n_cell_types)
-        self.cl_model = HyFiAE(self.model, args.embedding_dim)
-        self.cl_model.to(self.device)
+        self.model.to(self.device)
         
     def fit(self,
             hypergraph: STHypergraphData,
             embedder_args: HypergraphEmbedderArgs,
             num_epochs: int,
             batch_size: int,
-            accelerator: AcceleratorOptions,
-            seed: int = 42,
-            lambda_var: float = 0.0,
-            lambda_cov: float = 0.0,
-            lambda_nbr: float = 0.0,
-            temp_nbr: float = 0.5,
-            edge_preserving: bool = True,
-            reg_weight: float = 0.0,
-            optimize_hyperedges: bool = False,
-            rho_h: float = 1.0,
-            lambda_var_h: float = 0.0,
-            lambda_cov_h: float = 0.0,
-            lambda_nbr_h: float = 0.0,
-            patience: int = 0,
-            min_delta: float = 0.0,
-            min_epochs: int = 0):
+            accelerator: AcceleratorOptions):
+        # RNG is NOT seeded here: call hyperspot.utils.set_seed(seed) at the entry point.
 
         project_metadata = ProjectMetadata()
 
-        # set global seed for reproducibility
-        import random, numpy as np
-        torch.manual_seed(seed)
-        torch.cuda.manual_seed_all(seed)
-        torch.backends.cudnn.deterministic = True
-        torch.backends.cudnn.benchmark = False
-        np.random.seed(seed)
-        random.seed(seed)
 
-        # hyperedge autoencoder branch is opt-in (optimize_hyperedges). When on,
-        # the model needs a real (M × G) hyperedge_feats matrix to size/target the
-        # decoder; a legacy degree vector is a hard error rather than a silent no-op.
-        self.optimize_hyperedges = optimize_hyperedges
         _hf = hypergraph["hyperedge_feats"]
-        if optimize_hyperedges:
-            if _hf.dim() != 2:
-                raise ValueError(
-                    "optimize_hyperedges=True requires 2-D hyperedge_feats "
-                    "(spot-basis pseudobulk). Rebuild the hypergraph with "
-                    "n_hyperedge_feats>0.")
-            embedder_args.hyperedge_feat_dim = _hf.shape[1]
-        else:
-            embedder_args.hyperedge_feat_dim = None
+        if _hf.dim() != 2:
+            raise ValueError(
+                "optimize_hyperedges=True requires 2-D hyperedge_feats "
+                "(spot-basis pseudobulk). Rebuild the hypergraph with "
+                "n_hyperedge_feats>0.")
+        embedder_args.hyperedge_feat_dim = _hf.shape[1]
 
         self.__setup_model(embedder_args,
                            accelerator)
-        self.criterion = HGCTCAELoss(rho=1.0,
-                                     # per-cell-type embedding regularizers (opt-in; default off)
-                                     lambda_var=lambda_var,   # anti-collapse: variance hinge
-                                     lambda_cov=lambda_cov,   # anti-collapse: decorrelation
-                                     lambda_nbr=lambda_nbr,   # neighborhood contrastive
-                                     temp_nbr=temp_nbr,
-                                     edge_preserving=edge_preserving,  # bilateral (expr-gated) nbr pull
-                                     # hyperedge autoencoder branch (opt-in)
-                                     optimize_hyperedges=optimize_hyperedges,
-                                     rho_h=rho_h,
-                                     lambda_var_h=lambda_var_h,
-                                     lambda_cov_h=lambda_cov_h,
-                                     lambda_nbr_h=lambda_nbr_h)
-        # weight on the model's own regularizer (e.g. v4 cross-type gate L1)
-        self.reg_weight = reg_weight
+        self.criterion = HGCTCAELoss(rho=1.0, optimize_hyperedges=True)
         self.__configure_optimizer(num_epochs)
         self.criterion.to(self.device)
         
-        self.cl_model.train()
+        self.model.train()
         
         # use random sampler in training
         logger.info("Learning node and hyperedge embeddings...")
@@ -140,9 +83,7 @@ class HypergraphEmbedderDriver(object):
         hgloader = DataLoader(hgdataset, sampler=hgtrainsampler, batch_size=None)
 
         with tqdm(range(num_epochs)) as e_pbar:
-            max_epoch_loss = None
             min_epoch_loss = None
-            epochs_no_improve = 0
             for epoch in e_pbar:
                 # create function for 1 epoch that returns the loss
                 num_batches = len(hgloader)
@@ -162,7 +103,6 @@ class HypergraphEmbedderDriver(object):
                         epoch_hedge += h
 
                         b_pbar.set_postfix({'loss': l, 'node': n, 'hedge': h})
-                        gc.collect()
 
                 epoch_loss /= num_batches
                 epoch_node /= num_batches
@@ -170,46 +110,25 @@ class HypergraphEmbedderDriver(object):
 
                 self.scheduler.step()   # cosine lr anneal, once per epoch
 
-                if not max_epoch_loss or epoch_loss > max_epoch_loss:
-                    max_epoch_loss = epoch_loss
-
-                # Reset the patience counter only on a *meaningful* (> min_delta)
-                # improvement, but still checkpoint on any new best so the saved
-                # model is always the lowest-loss one seen.
-                improved = (min_epoch_loss is None) or (epoch_loss < min_epoch_loss - min_delta)
                 if (min_epoch_loss is None) or (epoch_loss < min_epoch_loss):
                     min_epoch_loss = epoch_loss
                     checkpoint = {
                         'epoch': epoch,
                         'embedder_state_dict': copy.deepcopy(self.model.state_dict()),
-                        'criterion_state_dict': copy.deepcopy(self.criterion.state_dict()),
                         'optimizer_state_dict': self.optimizer.state_dict(),
                         'loss': min_epoch_loss
                     }
                     torch.save(checkpoint, project_metadata.project_folder / f'{self.model.checkpoint_name()}.pth')
-                epochs_no_improve = 0 if improved else epochs_no_improve + 1
 
                 e_pbar.set_postfix({
                     'epoch_loss': epoch_loss,
                     'node': epoch_node,
                     'hedge': epoch_hedge,
                     'min_loss': min_epoch_loss,
-                    'no_improve': epochs_no_improve,
                     'lr': self.scheduler.get_last_lr()[0]})
-
-                # Early stopping at convergence: stop once the loss has plateaued
-                # (no > min_delta improvement) for `patience` epochs. patience=0
-                # disables it (runs the full num_epochs). min_epochs guards against
-                # stopping during an early, noisy dip -- relevant here since the
-                # K/M sampling makes per-epoch loss stochastic.
-                if patience > 0 and (epoch + 1) >= min_epochs and epochs_no_improve >= patience:
-                    logger.info(f"Early stopping at epoch {epoch}: no >{min_delta} "
-                                f"improvement for {patience} epochs (best {min_epoch_loss:.6f}).")
-                    break
-
                     
     def __configure_optimizer(self, num_epochs):
-        self.optimizer = optim.Adam(list(self.cl_model.parameters()) + list(self.criterion.parameters()), lr=0.001)
+        self.optimizer = optim.Adam(self.model.parameters(), lr=0.001)
         # default schedule: cosine-anneal the lr toward ~0 over the whole run,
         # stepped once per epoch (sharpens late convergence)
         self.scheduler = optim.lr_scheduler.CosineAnnealingLR(self.optimizer, T_max=num_epochs)
@@ -218,13 +137,12 @@ class HypergraphEmbedderDriver(object):
 
         batch = batch.to_device(self.device)        
 
-        if self.cl_model.training:
+        if self.model.training:
             (node_embeddings,
              hyperedge_embeddings,
-             # augmented_node_embeddings,
-             # augmented_hyperedge_embeddings,
              reconstruction,
-             hyperedge_reconstruction) = self.cl_model(batch)
+             hyperedge_reconstruction, 
+             _) = self.model(batch)
 
             n_h = batch.neighborhood_n_hyperedges
             contrastive_loss, node_total, hyperedge_total = self.criterion(
@@ -236,25 +154,14 @@ class HypergraphEmbedderDriver(object):
                                               batch.sample_n_cells,
                                               batch.sample_n_hyperedges,
                                               hyperedge_embeddings=hyperedge_embeddings[:n_h],
-                                              hyperedge_recon=(hyperedge_reconstruction[:n_h]
-                                                               if hyperedge_reconstruction is not None else None),
+                                              hyperedge_recon=hyperedge_reconstruction[:n_h],
                                               hyperedge_feats=batch.batch_hyperedge_feats[:n_h])
-
-            # optional model-side regularizer (e.g. v4 cross-type gate L1) — counts
-            # toward the node total so total == node_total + hyperedge_total
-            encoder = getattr(getattr(self.model, "model", None), "encoder", None)
-            if encoder is not None and hasattr(encoder, "regularization_loss"):
-                gate = self.reg_weight * encoder.regularization_loss()
-                contrastive_loss = contrastive_loss + gate
-                node_total = node_total + gate.detach()
 
             return contrastive_loss, node_total, hyperedge_total
         
         else:
-            out = self.model(batch)   # 3-, 4-, or 5-tuple depending on the model
-
-            un = out[4] if len(out) >= 5 else None
-            return out[0], out[1], un  # node_embeddings, hyperedge_embeddings, neighborhood (un)
+            node_embeddings, hyperedge_embeddings, _, _, un = self.model(batch)
+            return node_embeddings, hyperedge_embeddings, un
         
     def generate_embedding(self,
                            hypergraph: STHypergraphData,
@@ -263,12 +170,14 @@ class HypergraphEmbedderDriver(object):
                            accelerator: AcceleratorOptions,
                            K: float = 0.7,
                            M: float = 0.7):
+        # K/M neighborhood sampling uses torch's RNG, which is NOT seeded here:
+        # call hyperspot.utils.set_seed(seed) at the entry point for reproducible embeddings.
 
         project_metadata = ProjectMetadata()
-        
+
         self.__setup_model(embedder_args, accelerator)
         self.model.load_checkpoint()
-        self.cl_model.eval()
+        self.model.eval()
         
         hgdataset = STHypergraphMatrixDataset(hypergraph, K=K, M=M)
 
@@ -284,27 +193,23 @@ class HypergraphEmbedderDriver(object):
         neighborhood_embedding_batches = []
         node_id_batches = []
         hyperedge_id_batches = []
-        for batch in tqdm(hgloader, leave=False, disable=True):
-            n_cells = batch.sample_n_cells
-            n_hyperedges = batch.sample_n_hyperedges
-
-            node_embedding_batch, hyperedge_embedding_batch, neighborhood_embedding_batch = self.__step_batch(batch)
-            node_embedding_batches.append(node_embedding_batch[:n_cells].detach().cpu())
-            hyperedge_embedding_batches.append(hyperedge_embedding_batch[:n_hyperedges].detach().cpu())
-            if neighborhood_embedding_batch is not None:
-                neighborhood_embedding_batches.append(neighborhood_embedding_batch[:n_cells].detach().cpu())
-
-            node_id_batches.append(batch.batch_subgraph_cells[:n_cells].detach().cpu())
-            hyperedge_id_batches.append(batch.batch_subgraph_hyperedges[:n_hyperedges].detach().cpu())
-
-            print(node_embedding_batch.shape, node_embedding_batch[:n_cells].shape)
-            print(hyperedge_embedding_batch.shape, hyperedge_embedding_batch[:n_hyperedges].shape)
+        with torch.no_grad():
+            for batch in tqdm(hgloader, leave=False, disable=True):
+                n_cells = batch.sample_n_cells
+                n_hyperedges = batch.sample_n_hyperedges
+    
+                node_embedding_batch, hyperedge_embedding_batch, neighborhood_embedding_batch = self.__step_batch(batch)
+                node_embedding_batches.append(node_embedding_batch[:n_cells].cpu())
+                hyperedge_embedding_batches.append(hyperedge_embedding_batch[:n_hyperedges].cpu())
+    
+                neighborhood_embedding_batches.append(neighborhood_embedding_batch[:n_cells].cpu())
+    
+                node_id_batches.append(batch.batch_subgraph_cells[:n_cells].cpu())
+                hyperedge_id_batches.append(batch.batch_subgraph_hyperedges[:n_hyperedges].cpu())
 
         logger.info("Saving embeddings...")
         node_embeddings = torch.cat(node_embedding_batches, dim=0)
         hyperedge_embeddings = torch.cat(hyperedge_embedding_batches, dim=0)
-
-        print(node_embeddings.shape)
         
         node_ids = torch.cat(node_id_batches, dim=0)
         node_order = torch.argsort(node_ids)
@@ -315,16 +220,11 @@ class HypergraphEmbedderDriver(object):
                                                                   hyperedge_ids,
                                                                   hypergraph["num_spots"])
 
-        print(node_embeddings.shape, hyperedge_embeddings.shape)
         torch.save(node_embeddings, project_metadata.project_folder / "node_embeddings.pth")
         torch.save(hyperedge_embeddings, project_metadata.project_folder / "hyperedge_embeddings.pth")
 
-        # neighborhood (post-norm un) branch of the fused node embedding: per cell,
-        # aligned row-for-row with node_embeddings (same node_order). Only models that
-        # expose un (index 4) populate this; others skip the file.
-        if neighborhood_embedding_batches:
-            neighborhood_embeddings = torch.cat(neighborhood_embedding_batches, dim=0)[node_order]
-            torch.save(neighborhood_embeddings, project_metadata.project_folder / "neighborhood_embeddings.pth")
+        neighborhood_embeddings = torch.cat(neighborhood_embedding_batches, dim=0)[node_order]
+        torch.save(neighborhood_embeddings, project_metadata.project_folder / "neighborhood_embeddings.pth")
 
     def __reduce_hyperedge_embeddings(self, hyperedge_embeddings, hyperedge_ids, n_hyperedges):
         hyperedge_ids = hyperedge_ids.squeeze().long()
