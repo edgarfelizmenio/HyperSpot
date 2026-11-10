@@ -314,7 +314,6 @@ class CTHGCAEv6Embedder(HypergraphEmbedder):
             embedding_dim=args.embedding_dim,
             dropout=args.dropout,
             hyperedge_feat_dim=args.hyperedge_feat_dim,
-            hyperedge_pool=args.hyperedge_pool,
         )
         return cls(model)
 
