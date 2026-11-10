@@ -173,15 +173,38 @@ def load_aggr_st_data():
         adata_aggr.obs['domain'] = adata_aggr.obs['domain'].astype('category')
     return adata_aggr
 
-def save_ct_spatial_data(adata_ct, cell_type: str):
-    # save adata for cell type
-    adata_ct.write_h5ad(ProjectMetadata().ct_data_dir / f'ST_cell_{cell_type}.h5ad')
+# The H&E image is stored once, in ST_orig.h5ad. Per-cell-type files are written
+# without uns['spatial'] (it used to be duplicated into every cell type, ~1 GB each)
+# and gzip-compressed (Spotiphy same-spot duplicates compress ~13x, values unchanged).
+# load_ct_spatial_data re-attaches the image in memory, so plotting is unaffected.
+_ST_SPATIAL_UNS = {}
 
-def load_ct_spatial_data(cell_type: str):
-    # load adata for cell type
+def _st_spatial_uns():
+    """uns['spatial'] of ST_orig.h5ad, read once per project and shared (not copied)."""
+    pf = ProjectMetadata().project_folder
+    if pf not in _ST_SPATIAL_UNS:
+        _ST_SPATIAL_UNS[pf] = sc.read_h5ad(pf / 'ST_orig.h5ad', backed='r').uns.get('spatial')
+    return _ST_SPATIAL_UNS[pf]
+
+def save_ct_spatial_data(adata_ct, cell_type: str):
+    # save adata for cell type, without the image (restored on the in-memory object)
+    spatial = adata_ct.uns.pop('spatial', None)
+    try:
+        adata_ct.write_h5ad(ProjectMetadata().ct_data_dir / f'ST_cell_{cell_type}.h5ad',
+                            compression='gzip')
+    finally:
+        if spatial is not None:
+            adata_ct.uns['spatial'] = spatial
+
+def load_ct_spatial_data(cell_type: str, with_image: bool = True):
+    # load adata for cell type; legacy files that still carry their own image keep it
     adata_ct = sc.read_h5ad(ProjectMetadata().ct_data_dir / f"ST_cell_{cell_type}.h5ad")
     if 'domain' in adata_ct.obs:      # ensure discrete for plotting (squidpy/scanpy)
         adata_ct.obs['domain'] = adata_ct.obs['domain'].astype('category')
+    if with_image and 'spatial' not in adata_ct.uns:
+        spatial = _st_spatial_uns()
+        if spatial is not None:
+            adata_ct.uns['spatial'] = spatial    # shared reference: treat as read-only
     return adata_ct
 
 
