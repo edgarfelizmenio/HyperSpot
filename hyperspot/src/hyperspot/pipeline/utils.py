@@ -9,6 +9,9 @@ from ..config import AcceleratorOptions
 
 def get_device(accelerator: AcceleratorOptions):
     if accelerator == AcceleratorOptions.CUDA:
+        if not torch.cuda.is_available():
+            raise RuntimeError("No CUDA GPU is available. Use --accelerator cpu, or check the "
+                               "GPU driver and CUDA_VISIBLE_DEVICES.")
         n_devices = torch.cuda.device_count()
         cuda_visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES")
         if cuda_visible_devices:
