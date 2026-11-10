@@ -35,13 +35,15 @@ def HyperSpot_eval_pipeline(
     num_epochs,
     batch_size,
     accelerator,
-    embedding_key="embedding",
-    algorithm="leiden",
-    min_cluster_pct=-1,
+    clustering: dict | None = None,
+    ct_clustering: dict | None = None,
     copy_var_cols=None,
-    seed: int = 0,
-    n_pca_components: int = 50,
+    seed: int = 42,
 ):
+    # clustering / ct_clustering: keyword arguments for compute_spatial_clusters /
+    # compute_ct_spatial_clusters (tissue / cell-type domains); empty -> their defaults.
+    clustering = dict(clustering or {})
+    ct_clustering = dict(ct_clustering or {})
 
     # one seed per pipeline run (train -> embed -> cluster -> score): run_i depends only on its seed
     set_seed(seed)
@@ -66,26 +68,12 @@ def HyperSpot_eval_pipeline(
 
     # clustering tissue domains
     clustering_driver.create_aggr_st_data(var_cols=copy_var_cols)
-    clustering_driver.load_embedding_to_aggr_data(embedding_key)
-    clustering_driver.compute_spatial_clusters(
-        embedding_key=embedding_key,
-        algorithm=algorithm,
-        min_cluster_pct=min_cluster_pct,
-        seed=seed,
-        n_pca_components=n_pca_components,
-        dedup_spots=True,
-    )
+    clustering_driver.load_embedding_to_aggr_data(clustering.get("embedding_key", "embedding"))
+    clustering_driver.compute_spatial_clusters(**clustering, seed=seed)
 
     # clustering cell type domains
-    clustering_driver.load_embedding_to_ct_spatial_data(embedding_key)
-    clustering_driver.compute_ct_spatial_clusters(
-        embedding_key=embedding_key,
-        algorithm=algorithm,
-        min_cluster_pct=min_cluster_pct,
-        seed=seed,
-        n_pca_components=n_pca_components,
-        dedup_spots=True,
-    )
+    clustering_driver.load_embedding_to_ct_spatial_data(ct_clustering.get("embedding_key", "embedding"))
+    clustering_driver.compute_ct_spatial_clusters(**ct_clustering, seed=seed)
     
     run_dir = project_metadata.eval_dir / f"run_{run_number}"
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -114,10 +102,8 @@ def run_eval(
     num_epochs,
     batch_size,
     accelerator,
-    embedding_key="embedding",
-    algorithm="leiden",
-    min_cluster_pct=-1,
-    n_pca_components=50,
+    clustering: dict | None = None,
+    ct_clustering: dict | None = None,
     n=len(EVAL_SEEDS),
 ):
 
@@ -159,11 +145,9 @@ def run_eval(
             num_epochs,
             batch_size,
             accelerator,
-            embedding_key=embedding_key,
-            algorithm=algorithm,
-            min_cluster_pct=min_cluster_pct,
+            clustering=clustering,
+            ct_clustering=ct_clustering,
             seed=seed,
-            n_pca_components=n_pca_components,
         )
 
 class ClusterEvaluation(object):

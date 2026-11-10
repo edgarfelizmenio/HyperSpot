@@ -15,7 +15,7 @@ import torch
 
 from cyclopts import App, Parameter
 from dataclasses import dataclass, astuple
-from typing import Optional, Annotated, List, Literal
+from typing import Optional, Annotated, List
 
 from pathlib import Path
 from tqdm.auto import tqdm
@@ -53,33 +53,33 @@ class ProjectArgs:
 class CommonArgs:
     seed: Annotated[int, Parameter(help="Seed for reproducibility")] = 42
 
-@dataclass
+@dataclass(kw_only=True)
 class EmbedderCLIArgs:
     model_name: Annotated[str, Parameter(help=f"Name of hypergraph embedder to use. Possible values: {HypergraphEmbedderDriver.get_available_embedders()}")] = "CTHGCAEv6Embedder"
     embedding_dim: Annotated[int, Parameter(help="Size of embedding.")] = 20
     dropout: Annotated[float, Parameter(help="Dropout parameter.")] = 0.2
 
-@dataclass
-class TrainerArgs:
-    num_epochs: int = 1000
-    batch_size: int = 8192
+@Parameter(name="*")
+@dataclass(kw_only=True)
+class RuntimeArgs:                  # how a run executes on the hardware (not what it computes)
+    batch_size: Annotated[int, Parameter(help="Cells per batch; lower it if the GPU runs out of memory.")] = 8192
     accelerator: config.AcceleratorOptions = config.AcceleratorOptions.CUDA
 
-@dataclass
-class ClusterArgs:
-    # minimum number of samples in a cluster as a percentage of the total number of samples.
+# kw_only: cyclopts would otherwise also accept the fields positionally, so a bare value
+# after a boolean flag (e.g. "--ct-clustering.dedup-spots False") would land in embedding_key.
+@dataclass(kw_only=True)
+class ClusterArgs:                  # tissue domains (one row per spot)
     embedding_key: str = "embedding"
-    algorithm: Literal["leiden", "agglomerative", "gmm"] = "leiden"
-    min_cluster_pct: float = -1     # fractional size floor OFF by default (dedup fixes the over-clustering it patched); absolute size floor below still applies
-    min_cluster_size: int = 3       # absolute size floor: domain must have >= this many cells (< 3 is statistically insignificant)
+    min_cluster_size: int = 3       # absolute size floor: domain must have >= this many spots
+    n_pca_components: int = 50      # PCA only if the embedding dim exceeds this
+
+@dataclass(kw_only=True)
+class CTClusterArgs:                # cell-type domains
+    embedding_key: str = "embedding"
+    min_cluster_size: int = 3       # absolute size floor: domain must have >= this many representatives
+    n_pca_components: int = 50      # PCA only if the embedding dim exceeds this
+    min_cluster_pct: float = -1     # min fraction of the cell type's CELLS per domain; OFF by default (dedup fixes the over-clustering it patched)
     dedup_spots: bool = True        # collapse same-spot same-CT duplicate cells before clustering (Spotiphy); guarded -> auto no-op on real per-cell variation. Set False for true-counts / per-cell data.
-    n_pca_components: int = 50
-    n_clusters: int = 20          # agglomerative: over-segment before min_cluster_pct merge
-    n_neighbors: int = 15         # leiden: base kNN; auto-bumped by per-spot cell count
-    select_pcs: bool = False      # gated-select: cluster only on multimodal PCs
-    pc_var_floor: float = 0.04    # min fractional variance for a PC to be considered
-    pc_dip_alpha: float = 0.05    # PC kept if Hartigan dip-test p < this (multimodal)
-    select_min_cells: int = 500   # skip gating below this many cells (can't estimate modality)
 
 @app.command(help="Create a project files directory.",
              sort_key=1)
@@ -92,8 +92,9 @@ def init_project_files_dir():
 def train_embedder(
     project: ProjectArgs,
     common: CommonArgs = CommonArgs(),
+    num_epochs: Annotated[int, Parameter(help="Training epochs.")] = 1000,
     model: EmbedderCLIArgs = EmbedderCLIArgs(),
-    trainer: TrainerArgs = TrainerArgs(),
+    runtime: RuntimeArgs = RuntimeArgs(),
 ):
     ProjectMetadata(project.project_dir)
 
@@ -112,9 +113,9 @@ def train_embedder(
     embedder.fit(
         hypergraph,
         args,
-        trainer.num_epochs,
-        trainer.batch_size,
-        trainer.accelerator,
+        num_epochs,
+        runtime.batch_size,
+        runtime.accelerator,
     )
 
 @app.command(help="Use the trained hypergraph model to generate the embeddings.",
@@ -125,7 +126,7 @@ def make_embedding(
     M: Annotated[float, Parameter(help="Fraction of neighborhood cells kept per hyperedge expansion at inference (fan-out cap, avoids OOM). 1.0 = full neighborhood.")] = 0.7,
     common: CommonArgs = CommonArgs(),
     model: EmbedderCLIArgs = EmbedderCLIArgs(),
-    trainer: TrainerArgs = TrainerArgs(),
+    runtime: RuntimeArgs = RuntimeArgs(),
 ):
 
     ProjectMetadata(project.project_dir)
@@ -140,8 +141,8 @@ def make_embedding(
     
     embedder.generate_embedding(hypergraph,
                                 args,
-                                trainer.batch_size,
-                                trainer.accelerator,
+                                runtime.batch_size,
+                                runtime.accelerator,
                                 K=K, M=M)
 
 @app.command(help="Using hyperedge embeddings, find the spatial domains present in the Spatial Transcriptomics tissue.",
@@ -170,16 +171,16 @@ def compute_spatial_domains(
             sort_key=5)
 def compute_celltype_spatial_domains(
     project: ProjectArgs,
-    clustering: ClusterArgs = ClusterArgs(),
+    ct_clustering: CTClusterArgs = CTClusterArgs(),
     common: CommonArgs = CommonArgs(),
 ):
     ProjectMetadata(project.project_dir)
     utils.set_seed(common.seed)
-    
+
     clustering_driver = HyperSpotClustering()
-    clustering_driver.load_embedding_to_ct_spatial_data(clustering.embedding_key)
+    clustering_driver.load_embedding_to_ct_spatial_data(ct_clustering.embedding_key)
     clustering_driver.compute_ct_spatial_clusters(
-        **vars(clustering),
+        **vars(ct_clustering),
         seed = common.seed,
     )
 
@@ -203,8 +204,9 @@ def compute_svgs(
     create_svg_list(svgs, rank_by=rank_by).to_csv(out / "svgs_ST.csv")
     print(f"SVGs -> {out / 'svgs_ST.csv'}")
 
-@app.command(help="Detect cell-type-specific SVGs (ctSVGs): domain-marker genes per cell type -> svgs_ct_<ct>.csv. Default: all cell types; --cell-types limits to a subset. Requires per-CT domains first (compute-celltype-spatial-domains).",
-             sort_key=9)
+@app.command(
+    help="Detect cell-type-specific SVGs (ctSVGs): domain-marker genes per cell type -> svgs_ct_<ct>.csv. Default: all cell types; --cell-types limits to a subset. Requires per-CT domains first (compute-celltype-spatial-domains).",         
+    sort_key=9)
 def compute_ct_svgs(
     project: ProjectArgs,
     cell_types: Annotated[Optional[List[str]], Parameter(help="Restrict ctSVG detection to these cell types (default: all).")] = None,
@@ -230,9 +232,11 @@ def compute_ct_svgs(
 @app.command(help="Run evaluation test.", sort_key=6)
 def perform_model_evaluation(
     project: ProjectArgs,         
+    num_epochs: Annotated[int, Parameter(help="Training epochs.")] = 1000,
     model: EmbedderCLIArgs = EmbedderCLIArgs(),
-    trainer: TrainerArgs = TrainerArgs(),
+    runtime: RuntimeArgs = RuntimeArgs(),
     clustering: ClusterArgs = ClusterArgs(),
+    ct_clustering: CTClusterArgs = CTClusterArgs(),
     num_runs: int = 10,
 ):
 
@@ -248,13 +252,11 @@ def perform_model_evaluation(
     run_eval(
         hypergraph,
         args,
-        trainer.num_epochs,
-        trainer.batch_size,
-        trainer.accelerator,
-        embedding_key=clustering.embedding_key,
-        algorithm=clustering.algorithm,
-        min_cluster_pct=clustering.min_cluster_pct,
-        n_pca_components=clustering.n_pca_components,
+        num_epochs,
+        runtime.batch_size,
+        runtime.accelerator,
+        clustering=vars(clustering),
+        ct_clustering=vars(ct_clustering),
         n=num_runs,
     )
 
