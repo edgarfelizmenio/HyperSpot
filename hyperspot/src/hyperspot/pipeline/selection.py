@@ -1,3 +1,4 @@
+import logging
 import os
 import numpy as np
 import pandas as pd
@@ -16,6 +17,8 @@ from ..utils import (
     guarded_spot_reps,
 )
 
+
+logger = logging.getLogger(__name__)
 
 def dedup_by_spot(adata, tol=1e-3, sample=100):
     """Collapse same-spot cells to one representative for spatial DE.
@@ -531,7 +534,7 @@ def compute_ct_svg_scores(
         )
         result.to_csv(out_dir / f'{_ct_safe(ct)}_raw.csv', index=False)
 
-    print(f"Saved per-CT per-domain scores to {out_dir}")
+    logger.info(f"Saved per-CT per-domain scores to {out_dir}")
 
 
 def compile_ct_svg_scores(
@@ -595,7 +598,7 @@ def compile_ct_svg_scores(
             out_cols.append('passes_filter')
         best[out_cols].to_csv(out_dir / f'{_ct_safe(ct)}.csv')
 
-    print(f"Compiled per-CT SVG scores to {out_dir}")
+    logger.info(f"Compiled per-CT SVG scores to {out_dir}")
 
 
 def compute_ct_domain_svg_scores(
@@ -636,7 +639,7 @@ def compute_ct_domain_svg_scores(
                 out_dir / f'{_ct_safe(ct)}_domain_{domain}.csv'
             )
 
-    print(f"Saved per-(CT, domain) score files to {out_dir}")
+    logger.info(f"Saved per-(CT, domain) score files to {out_dir}")
 
 
 def filter_svg_scores(
@@ -670,7 +673,7 @@ def filter_svg_scores(
         )
         df[mask].to_csv(out_dir / csv.name)
 
-    print(f"Filtered CSVs written to {out_dir}")
+    logger.info(f"Filtered CSVs written to {out_dir}")
 
 def create_svg_list(
     domain_svgs, 

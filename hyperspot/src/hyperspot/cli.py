@@ -8,6 +8,20 @@ import os
 for _v in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
     os.environ.setdefault(_v, "16")
 
+# Show HyperSpot's own log messages on the console. Without a handler Python only prints
+# WARNING and above, so logger.info() calls were silently dropped. Configured here (module
+# level) because the `hyperspot` entry point calls `app` directly and never runs __main__.
+# Only the "hyperspot" logger is configured, so INFO chatter from scanpy/anndata stays hidden.
+# Set HYPERSPOT_LOG_LEVEL=DEBUG for more detail (or WARNING for less).
+import logging
+_log_handler = logging.StreamHandler()
+_log_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s", datefmt="%H:%M:%S"))
+_hs_logger = logging.getLogger("hyperspot")
+_hs_logger.addHandler(_log_handler)
+_hs_logger.setLevel(os.environ.get("HYPERSPOT_LOG_LEVEL", "INFO").upper())
+_hs_logger.propagate = False
+logger = logging.getLogger(__name__)
+
 import cyclopts
 import numpy as np
 import scanpy as sc
@@ -101,8 +115,7 @@ def train_embedder(
     utils.set_seed(common.seed)
     hypergraph = STHypergraphData.load()
 
-    print("hyperedges: ", hypergraph["hyperedge_feats"].shape[0])
-    print(vars(model))
+    logger.debug(f"hyperedges: {hypergraph['hyperedge_feats'].shape[0]}; model args: {vars(model)}")
     
     embedder = HypergraphEmbedderDriver()
     args = HypergraphEmbedderArgs(
@@ -202,7 +215,7 @@ def compute_svgs(
     svgs = compute_domain_svgs(key=key, min_pts=min_pts, min_logfc=min_logfc,
                                rank_by=rank_by, dedup_spots=dedup_spots)
     create_svg_list(svgs, rank_by=rank_by).to_csv(out / "svgs_ST.csv")
-    print(f"SVGs -> {out / 'svgs_ST.csv'}")
+    logger.info(f"SVGs -> {out / 'svgs_ST.csv'}")
 
 @app.command(
     help="Detect cell-type-specific SVGs (ctSVGs): domain-marker genes per cell type -> svgs_ct_<ct>.csv. Default: all cell types; --cell-types limits to a subset. Requires per-CT domains first (compute-celltype-spatial-domains).",         
@@ -227,7 +240,7 @@ def compute_ct_svgs(
         ct_svgs = compute_domain_ct_svgs(ct, key=key, min_pts=min_pts, min_logfc=min_logfc,
                                          rank_by=rank_by, dedup_spots=dedup_spots)
         create_svg_list(ct_svgs, rank_by=rank_by).to_csv(out / f"svgs_ct_{ct}.csv")
-        print(f"ctSVGs [{ct}] -> {out / ('svgs_ct_' + ct + '.csv')}")
+        logger.info(f"ctSVGs [{ct}] -> {out / ('svgs_ct_' + ct + '.csv')}")
 
 @app.command(help="Run evaluation test.", sort_key=6)
 def perform_model_evaluation(

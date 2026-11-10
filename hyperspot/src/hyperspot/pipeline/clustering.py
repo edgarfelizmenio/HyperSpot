@@ -1,3 +1,4 @@
+import logging
 import anndata as ad
 import numpy as np
 import pandas as pd
@@ -17,6 +18,8 @@ from ..utils import (
     save_aggr_st_data,
     guarded_spot_reps,
 )
+
+logger = logging.getLogger(__name__)
 
 class HyperSpotClustering(object):
     def __init__(self):
@@ -54,7 +57,7 @@ class HyperSpotClustering(object):
                 adata.obsm[pca_key] = PCA(n_components=n_comps, random_state=seed).fit_transform(adata.obsm[embedding_key])
                 cluster_key = pca_key
             else:
-                print(f"  pca: embedding dim {dim} <= n_pca_components {n_pca_components}; clustering on embedding as-is")
+                logger.debug(f"PCA skipped: embedding dim {dim} <= n_pca_components {n_pca_components}")
                 
             # DEDUP: same-spot same-CT cells are EXACT duplicates
             # (the deconvolution gives every cell of a type in a spot the same profile
@@ -161,7 +164,7 @@ class HyperSpotClustering(object):
             cluster_results
         )
 
-        print(f"Tissue: num spots = {adata_aggr.n_obs}, num domains = {adata_aggr.obs[label_key].nunique()}")
+        logger.info(f"Tissue: num spots = {adata_aggr.n_obs}, num domains = {adata_aggr.obs[label_key].nunique()}")
 
     def compute_ct_spatial_clusters(self,
                                     type_list=[],
@@ -192,7 +195,7 @@ class HyperSpotClustering(object):
 
             save_ct_spatial_data(adata_ct, ct)
             cluster_results[ct] = adata_ct.obs[label_key].to_numpy(dtype=str)
-            print(f"{ct}: num cells = {adata_ct.n_obs}, num domains = {adata_ct.obs[label_key].nunique()}")
+            logger.info(f"{ct}: num cells = {adata_ct.n_obs}, num domains = {adata_ct.obs[label_key].nunique()}")
 
         np.savez(project_metadata.clustering_dir / "cell_type_spatial_domains.npz", **cluster_results)
 

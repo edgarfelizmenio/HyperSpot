@@ -1,3 +1,4 @@
+import logging
 import numpy as np
 import pandas as pd
 import scanpy as sc
@@ -27,6 +28,8 @@ from . import (
     compute_domain_ct_svgs,
     create_svg_list,
 )
+
+logger = logging.getLogger(__name__)
 
 def HyperSpot_eval_pipeline(
     run_number: int,
@@ -131,10 +134,10 @@ def run_eval(
     todo = [i for i in range(n) if not _run_complete(i)]
 
     if not todo:
-        print(f"All {n} run(s) present and complete; nothing to do.")
+        logger.info(f"All {n} run(s) present and complete; nothing to do.")
         return
 
-    print(f"Running run(s) {todo} with seeds {[EVAL_SEEDS[i] for i in todo]}.")
+    logger.info(f"Running run(s) {todo} with seeds {[EVAL_SEEDS[i] for i in todo]}.")
 
     for run_number in todo:
         seed = EVAL_SEEDS[run_number]
