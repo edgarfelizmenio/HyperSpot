@@ -17,7 +17,7 @@ from ..dataset.hypergraph import STHypergraphMatrixDataset, STHypergraphBatchMat
 from ..metadata import ProjectMetadata
 
 from ..model.hypergraph import HypergraphEmbedder, HypergraphEmbedderArgs
-from ..model.cl.hyperspotloss import HGCTCAELoss
+from ..model.hyperspotloss import HGCTCAELoss
 
 from ..config import AcceleratorOptions
 
