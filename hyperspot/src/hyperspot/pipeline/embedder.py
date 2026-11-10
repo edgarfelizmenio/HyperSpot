@@ -52,9 +52,9 @@ class HypergraphEmbedderDriver(object):
         _hf = hypergraph["hyperedge_feats"]
         if _hf.dim() != 2:
             raise ValueError(
-                "optimize_hyperedges=True requires 2-D hyperedge_feats "
-                "(spot-basis pseudobulk). Rebuild the hypergraph with "
-                "n_hyperedge_feats>0.")
+                f"HyperSpot training requires 2-D hyperedge_feats (one spot-level "
+                f"pseudobulk vector per hyperedge), but this hypergraph has shape "
+                f"{tuple(_hf.shape)}. Rebuild the hypergraph with n_hyperedge_feats > 0.")
         embedder_args.hyperedge_feat_dim = _hf.shape[1]
 
         self.__setup_model(embedder_args,
