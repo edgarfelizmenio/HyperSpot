@@ -3,8 +3,6 @@ import numpy as np
 import pandas as pd
 import scanpy as sc
 
-from pathlib import Path
-
 import scipy.sparse as sp
 
 from ..metadata import ProjectMetadata
@@ -17,9 +15,9 @@ from ..utils import (
 
 logger = logging.getLogger(__name__)
 
-# Significance level for calling a (ct)SVG domain (scanpy BH-adjusted p). Shared by
-# detection (compute_spatial_de_genes) and scoring (compile_ct_svg_scores) so both
-# call the same genes.
+# Significance level for calling a (ct)SVG domain (scanpy BH-adjusted p). Used by the
+# single detection split (_split_de_table), so the ct-SVG lists and the per-gene table
+# (compute_svg_results) call the same genes.
 DETECTION_ALPHA = 0.05
 
 def dedup_by_spot(adata, tol=1e-3, sample=100):
@@ -101,22 +99,20 @@ def _compute_spatial_de_table(
     pval_adjust: str = 'scanpy',
     pval_thresh: float = None,
     filter_mode: str = 'drop',
-    best_domain_per_gene: bool = False,
     dedup_spots: bool = True,
 ):
     """Single engine for spatial-DE / (ct)SVG statistics -> flat per-(gene, domain) DataFrame.
 
-    Shared by the tissue-wide SVG path (compute_domain_svgs), the per-cell-type
-    ctSVG detection path (compute_domain_ct_svgs) -- both via compute_spatial_de_genes
-    -- and the scoring path (compute_ct_svg_scores); these differ only in the flags
-    below.
+    Detection and the per-gene table (compute_spatial_de_genes, compute_svg_results)
+    both call it unfiltered through _de_table_all; analysis notebooks and scripts call
+    it directly with the flags below.
 
     method : 'wilcoxon'
         scanpy one-vs-rest Wilcoxon (normal approximation); the only test. Kept as a
         parameter so existing calls passing method='wilcoxon' still work.
     require_specificity : bool
         Add the pts/pts_rest > 1 term (gene detected in a larger fraction of the
-        domain than outside). Off in both detection and scoring: against all other
+        domain than outside). Off in detection: against all other
         cells of the type it is near-redundant once pts >= min_pts and logFC >=
         min_logfc hold (kidney: 0.07% of ct-SVGs at 0.8/1.5). Kept only for the
         sensitivity scripts. pts_rest == 0 counts as specific.
@@ -129,8 +125,6 @@ def _compute_spatial_de_table(
         How the pts/logfc/specificity/pval mask is applied. 'drop' removes failing
         rows; 'annotate' keeps all rows and adds a `passes_filter` column; 'none'
         keeps all rows with no mask.
-    best_domain_per_gene : bool
-        Collapse to one row per gene (its max-Wilcoxon-score domain).
 
     Columns: gene, domain, scores, logfoldchanges, pts, pts_rest, pval, pvals_adj
              [, passes_filter if annotate].
@@ -196,9 +190,6 @@ def _compute_spatial_de_table(
     elif filter_mode == 'annotate':
         df = df.copy()
         df['passes_filter'] = mask.values
-
-    if best_domain_per_gene:
-        df = df.loc[df.groupby('gene')['scores'].idxmax()]
 
     cols = ['gene', 'domain', 'scores', 'logfoldchanges', 'pts', 'pts_rest', 'pval', 'pvals_adj']
     if 'passes_filter' in df.columns:
@@ -323,121 +314,6 @@ def _run_wilcoxon_per_domain(adata_ct, key, rg):
         df['domain']   = group
         domain_dfs.append(df)
     return pd.concat(domain_dfs, ignore_index=True)
-
-
-
-def _ct_safe(ct: str) -> str:
-    return ct.replace(' ', '_').replace('+', '_').replace('/', '_')
-
-
-def compute_ct_svg_scores(
-    out_dir: Path = None,
-    key: str = 'domain',
-    min_pts: float = 0.8,
-    min_logfc: float = 1.5,
-    method: str = 'wilcoxon',
-    dedup_spots: bool = True,
-    best_domain_per_gene: bool = False,
-):
-    """
-    Score genes for ctSVG detection and save per-CT results.
-
-    Wilcoxon one-vs-rest per domain (method='wilcoxon', the only test; the
-    parameter stays for existing calls), keeping (gene, domain) rows that pass
-    pts >= min_pts and logfoldchanges >= min_logfc, with scanpy's per-domain
-    BH-adjusted p-value (pvals_adj).
-    Columns: gene, domain, scores, logfoldchanges, pts, pts_rest, pval, pvals_adj.
-
-    dedup_spots (default True): collapse same-spot same-CT duplicate cells to one
-        representative before scoring (as detection does). Guarded -> no-op if
-        cells genuinely vary. Set False for real per-cell expression benchmarks.
-
-    best_domain_per_gene (default False): False keeps one row per passing
-        gene-domain; True collapses to one row per gene (max-score domain).
-
-    Output filenames: <ct_safe>_raw.csv  (default dir: ProjectMetadata().domain_markers_dir)
-    Run compile_ct_svg_scores() to aggregate and finalize adj_pval.
-    """
-    project_metadata = ProjectMetadata()
-    out_dir = Path(out_dir) if out_dir is not None else project_metadata.domain_markers_dir
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    # scoring path: same engine as detection, but no inline p-value filter
-    # (compile_ct_svg_scores picks each gene's domain with the detection rule).
-    for ct in project_metadata.ct_list:
-        adata_ct = load_ct_spatial_data(ct)
-        result = _compute_spatial_de_table(
-            adata_ct,
-            key=key,
-            method=method,
-            min_pts=min_pts,
-            min_logfc=min_logfc,
-            require_specificity=False,
-            filter_mode='drop',
-            best_domain_per_gene=best_domain_per_gene,
-            dedup_spots=dedup_spots,
-        )
-        result.to_csv(out_dir / f'{_ct_safe(ct)}_raw.csv', index=False)
-
-    logger.info(f"Saved per-CT per-domain scores to {out_dir}")
-
-
-def compile_ct_svg_scores(
-    in_dir: Path = None,
-    out_dir: Path = None,
-):
-    """
-    Aggregate per-CT per-domain scores and compute adj_pval for benchmarking.
-
-    Reads <ct_safe>_raw.csv files written by compute_ct_svg_scores(), then
-    for each cell type:
-      1. Selects the best domain per gene as detection does: the highest-scoring
-         domain among those with adjusted p < DETECTION_ALPHA; a gene with no
-         significant domain keeps its top-scoring domain (adj_pval >= alpha), so
-         every gene still has one p-value to rank by. Genes called at alpha are
-         therefore exactly detection's (compute_domain_ct_svgs) at the same
-         thresholds.
-      2. adj_pval = that domain's scanpy BH-adjusted p-value (pvals_adj),
-         CombinedPvals = its raw p-value.
-      3. Writes one benchmarking CSV per cell type.
-
-    Default in_dir and out_dir: ProjectMetadata().domain_markers_dir
-    Output filenames: <ct_safe>.csv
-    Output columns per gene: CombinedPvals, adj_pval, scores, logfoldchanges,
-                              pts, pts_rest, best_domain.
-    """
-    project_metadata = ProjectMetadata()
-    in_dir  = Path(in_dir)  if in_dir  is not None else project_metadata.domain_markers_dir
-    out_dir = Path(out_dir) if out_dir is not None else project_metadata.domain_markers_dir
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    for ct in project_metadata.ct_list:
-        raw_csv = in_dir / f'{_ct_safe(ct)}_raw.csv'
-        if not raw_csv.exists():
-            continue
-        df = pd.read_csv(raw_csv)
-
-        out_cols = ['CombinedPvals', 'adj_pval', 'scores', 'logfoldchanges',
-                    'pts', 'pts_rest', 'best_domain']
-        if 'pvals_adj' not in df.columns:
-            raise ValueError(f"{raw_csv} has no pvals_adj column (written by an older "
-                             "compute_ct_svg_scores); re-run compute_ct_svg_scores.")
-        top = df.loc[df.groupby('gene')['scores'].idxmax()]
-        sig = df[df['pvals_adj'] < DETECTION_ALPHA]
-        top_sig = sig.loc[sig.groupby('gene')['scores'].idxmax()]
-        best = pd.concat([top_sig, top[~top['gene'].isin(top_sig['gene'])]])
-        best = best.set_index('gene').sort_index()
-        if best.empty:
-            pd.DataFrame(columns=out_cols).to_csv(out_dir / f'{_ct_safe(ct)}.csv')
-            continue
-        best['CombinedPvals'] = best['pval']
-        best['adj_pval'] = best['pvals_adj'].values
-        best.rename(columns={'domain': 'best_domain'}, inplace=True)
-        best[out_cols].to_csv(out_dir / f'{_ct_safe(ct)}.csv')
-
-    logger.info(f"Compiled per-CT SVG scores to {out_dir}")
-
-
 
 
 def create_svg_list(
