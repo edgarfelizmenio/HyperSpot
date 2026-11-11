@@ -2,7 +2,6 @@ import logging
 import os
 import numpy as np
 import pandas as pd
-import pickle
 import scanpy as sc
 
 from concurrent.futures import ProcessPoolExecutor
@@ -63,34 +62,6 @@ def _permutation_worker(ranks, domains, unique_domains, obs_dev, mu, batch_n, se
         exceed_count[i] += (perm_dev >= obs_dev[i]).sum(axis=0).astype(np.int32)
 
     return exceed_count
-
-def save_ct_svgs(cell_type, feat_idx):
-    project_metadata = ProjectMetadata()
-
-    ct_svg_groups = get_ct_svg_ids(cell_type, feat_idx)
-
-    ct_svgs = set()
-    for group in ct_svg_groups:
-        ct_svgs.update(ct_svg_groups[group])
-
-    ct_svgs = pd.Series(sorted(ct_svgs), name="ct-SVGs")
-
-    save_dir = project_metadata.attr_dir / f"cell_type_{cell_type}"            
-    
-    ct_svgs.to_csv(save_dir / "ct_svgs.csv", index=False)
-
-def get_ct_svg_ids(cell_type, feat_idx: dict[int, list]):
-    project_metadata = ProjectMetadata()
-    
-    with open(project_metadata.project_folder / "ct_features.pkl", "rb") as ctff:
-        ct_features = pickle.load(ctff)
-
-    gene_ids = ct_features[cell_type]
-    ct_svgs = []
-    for group_feat_idx in feat_idx:
-        ct_svgs.append([gene_ids[idx] for idx in group_feat_idx])
-
-    return ct_svgs
 
 def compute_domain_svgs(
     key: str = 'domain',

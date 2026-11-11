@@ -8,8 +8,6 @@ class ProjectMetadata:
     _lock = threading.Lock()
 
     _SUBDIRS = {
-        "attr_dir": "attribution",
-        "classifier_dir": "classifiers",
         "clustering_dir": "clustering",
         "ct_data_dir": "ct_spatial_data",
         "plot_dir": "plots",
