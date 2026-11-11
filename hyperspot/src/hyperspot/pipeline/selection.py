@@ -415,7 +415,7 @@ def compute_ct_svg_scores(
     out_dir: Path = None,
     key: str = 'domain',
     min_pts: float = 0.8,
-    min_logfc: float = 1.0,
+    min_logfc: float = 1.5,
     method: str = 'wilcoxon',
     pval_adjust: str = 'scanpy',
     n_permutations: int = 999,
