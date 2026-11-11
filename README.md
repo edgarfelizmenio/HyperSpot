@@ -33,6 +33,14 @@ Install in editable mode using pip:
   pip install -e hyperspot
   ```
 
+## Tutorial
+
+[`tutorial/`](tutorial/) runs HyperSpot end to end on a public kidney cancer sample (tumour core of
+patient PD47171, Li et al. 2022): Visium + scRNA-seq → Spotiphy single-cell decomposition → hypergraph
+embeddings → ct-domains → ct-SVGs. Start with [`tutorial/README.md`](tutorial/README.md) for setup and
+notebook order. The pipeline itself runs from the `hyperspot` CLI in
+[`03 HyperSpot Pipeline`](tutorial/03%20HyperSpot%20Pipeline.ipynb).
+
 ## Reproducibility
 
 HyperSpot seeds its random number generators once, at the entry point, never inside library functions
