@@ -1,10 +1,8 @@
 import logging
-import os
 import numpy as np
 import pandas as pd
 import scanpy as sc
 
-from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 import scipy.sparse as sp
@@ -18,6 +16,11 @@ from ..utils import (
 
 
 logger = logging.getLogger(__name__)
+
+# Significance level for calling a (ct)SVG domain (scanpy BH-adjusted p). Shared by
+# detection (compute_spatial_de_genes) and scoring (compile_ct_svg_scores) so both
+# call the same genes.
+DETECTION_ALPHA = 0.05
 
 def dedup_by_spot(adata, tol=1e-3, sample=100):
     """Collapse same-spot cells to one representative for spatial DE.
@@ -44,24 +47,6 @@ def dedup_by_spot(adata, tol=1e-3, sample=100):
     return adata[rep_idx].copy()
 
 
-def _permutation_worker(ranks, domains, unique_domains, obs_dev, mu, batch_n, seed):
-    """Run batch_n permutations and return exceed_count (n_domains, n_genes).
-
-    Module-level so it is picklable by ProcessPoolExecutor.
-    """
-    rng = np.random.default_rng(seed)
-    n_domains = len(unique_domains)
-    n_genes = ranks.shape[1]
-    exceed_count = np.zeros((n_domains, n_genes), dtype=np.int32)
-
-    perm_labels = np.array([rng.permutation(domains) for _ in range(batch_n)])
-    for i, d in enumerate(unique_domains):
-        perm_masks = (perm_labels == d).astype(np.float32)   # (batch_n, n_cells)
-        perm_W = perm_masks @ ranks                           # (batch_n, n_genes)
-        perm_dev = np.abs(perm_W - mu[i])                    # (batch_n, n_genes)
-        exceed_count[i] += (perm_dev >= obs_dev[i]).sum(axis=0).astype(np.int32)
-
-    return exceed_count
 
 def compute_domain_svgs(
     key: str = 'domain',
@@ -113,14 +98,11 @@ def _compute_spatial_de_table(
     min_pts: float = 0.8,
     min_logfc: float = 1.5,
     require_specificity: bool = False,
-    pval_adjust: str = 'none',
+    pval_adjust: str = 'scanpy',
     pval_thresh: float = None,
     filter_mode: str = 'drop',
     best_domain_per_gene: bool = False,
     dedup_spots: bool = True,
-    n_permutations: int = 999,
-    permutation_seed: int = 0,
-    n_workers: int = None,
 ):
     """Single engine for spatial-DE / (ct)SVG statistics -> flat per-(gene, domain) DataFrame.
 
@@ -129,35 +111,34 @@ def _compute_spatial_de_table(
     -- and the scoring path (compute_ct_svg_scores); these differ only in the flags
     below.
 
-    method : 'wilcoxon' | 'kruskal' | 'wilcoxon_permutation'
-        Which p-value to report in `pval`. 'wilcoxon' = scanpy one-vs-rest normal
-        approximation; 'kruskal' = KW omnibus per gene (annotated with the best
-        Wilcoxon domain, so inherently one row per gene); 'wilcoxon_permutation' =
-        empirical permutation p-value.
+    method : 'wilcoxon'
+        scanpy one-vs-rest Wilcoxon (normal approximation); the only test. Kept as a
+        parameter so existing calls passing method='wilcoxon' still work.
     require_specificity : bool
         Add the pts/pts_rest > 1 term (gene detected in a larger fraction of the
         domain than outside). Off in both detection and scoring: against all other
         cells of the type it is near-redundant once pts >= min_pts and logFC >=
         min_logfc hold (kidney: 0.07% of ct-SVGs at 0.8/1.5). Kept only for the
         sensitivity scripts. pts_rest == 0 counts as specific.
-    pval_adjust : 'scanpy' | 'none'
-        'scanpy' surfaces scanpy's BH-adjusted p-value as `pvals_adj` and lets
-        `pval_thresh` filter on it (only valid for method='wilcoxon'). 'none' reports
-        no adjusted p-value and applies no p-value filter (scoring defers BH to
-        compile_ct_svg_scores).
+    pval_adjust : 'scanpy'
+        scanpy's per-domain BH-adjusted p-value is always reported as `pvals_adj`.
+        Kept as a parameter so existing calls passing pval_adjust='scanpy' still work.
     pval_thresh : float or None
-        Cutoff applied to the adjusted p-value; requires pval_adjust='scanpy'.
+        Cutoff applied to the adjusted p-value (None: no p-value filter).
     filter_mode : 'drop' | 'annotate' | 'none'
         How the pts/logfc/specificity/pval mask is applied. 'drop' removes failing
-        rows (detection, wilcoxon scoring); 'annotate' keeps all rows and adds a
-        `passes_filter` column (kruskal scoring); 'none' keeps all rows with no mask
-        (permutation scoring, where the empirical p-value stands alone).
+        rows; 'annotate' keeps all rows and adds a `passes_filter` column; 'none'
+        keeps all rows with no mask.
     best_domain_per_gene : bool
         Collapse to one row per gene (its max-Wilcoxon-score domain).
 
-    Columns: gene, domain, scores, logfoldchanges, pts, pts_rest, pval
-             [, pvals_adj if pval_adjust='scanpy'] [, passes_filter if annotate].
+    Columns: gene, domain, scores, logfoldchanges, pts, pts_rest, pval, pvals_adj
+             [, passes_filter if annotate].
     """
+    if method != 'wilcoxon':
+        raise ValueError(f"method={method!r}: only 'wilcoxon' is supported")
+    if pval_adjust != 'scanpy':
+        raise ValueError(f"pval_adjust={pval_adjust!r}: only 'scanpy' is supported")
     # dedup_spots=True (default, Spotiphy): same-spot same-CT cells are exact
     # deconvolution duplicates -> collapse to unique spots so the Wilcoxon test
     # (and pts) treats each spot as one observation, not N identical replicates.
@@ -186,9 +167,7 @@ def _compute_spatial_de_table(
             f"_compute_spatial_de_table: skipping DE on '{key}' -- need >=2 domains "
             f"with >=2 observations (have {len(counts)} domain(s), sizes "
             f"{counts.to_dict()}); returning no genes (sparse cell type).")
-        cols = ['gene', 'domain', 'scores', 'logfoldchanges', 'pts', 'pts_rest', 'pval']
-        if pval_adjust == 'scanpy':
-            cols.append('pvals_adj')
+        cols = ['gene', 'domain', 'scores', 'logfoldchanges', 'pts', 'pts_rest', 'pval', 'pvals_adj']
         if filter_mode == 'annotate':
             cols.append('passes_filter')
         return pd.DataFrame({c: pd.Series(dtype=object) for c in cols})
@@ -201,30 +180,15 @@ def _compute_spatial_de_table(
                             pts=True, use_raw=False)
     rg = adata.uns['rank_genes_groups']
 
-    if method == 'kruskal':
-        # already one row per gene (KW omnibus); recompute passes_filter uniformly
-        df = _run_kruskal_per_ct(adata, key, rg, min_pts, min_logfc)
-        df = df.drop(columns=['passes_filter'])
-    elif method == 'wilcoxon_permutation':
-        df = _run_wilcoxon_permutation_per_ct(
-            adata, key, rg, n_permutations=n_permutations,
-            seed=permutation_seed, n_workers=n_workers)
-    else:  # wilcoxon
-        df = _run_wilcoxon_per_domain(adata, key, rg)
-        df.rename(columns={'names': 'gene', 'pvals': 'pval'}, inplace=True)
-
-    if pval_adjust == 'scanpy':
-        if 'pvals_adj' not in df.columns:
-            raise ValueError(
-                "pval_adjust='scanpy' is only available for method='wilcoxon'")
-        # keep pvals_adj as-is (already carried through); nothing else to do
+    df = _run_wilcoxon_per_domain(adata, key, rg)
+    df.rename(columns={'names': 'gene', 'pvals': 'pval'}, inplace=True)
 
     # passing mask: prevalence + fold change (+ optional specificity + optional p)
     mask = (df['pts'] >= min_pts) & (df['logfoldchanges'] >= min_logfc)
     if require_specificity:
         ratio = df['pts'] / df['pts_rest'].replace(0, np.nan)
         mask &= (ratio > 1) | df['pts_rest'].eq(0)
-    if pval_adjust == 'scanpy' and pval_thresh is not None:
+    if pval_thresh is not None:
         mask &= df['pvals_adj'] < pval_thresh
 
     if filter_mode == 'drop':
@@ -236,9 +200,7 @@ def _compute_spatial_de_table(
     if best_domain_per_gene:
         df = df.loc[df.groupby('gene')['scores'].idxmax()]
 
-    cols = ['gene', 'domain', 'scores', 'logfoldchanges', 'pts', 'pts_rest', 'pval']
-    if pval_adjust == 'scanpy' and 'pvals_adj' in df.columns:
-        cols.append('pvals_adj')
+    cols = ['gene', 'domain', 'scores', 'logfoldchanges', 'pts', 'pts_rest', 'pval', 'pvals_adj']
     if 'passes_filter' in df.columns:
         cols.append('passes_filter')
     return df[cols].reset_index(drop=True)
@@ -253,102 +215,99 @@ def compute_spatial_de_genes(adata,
                             ):
     """Detection path: filtered spatial DE genes per domain, as {domain: df}.
 
-    Thin wrapper over _compute_spatial_de_table with the detection configuration:
-    Wilcoxon, pts/logFC thresholds, and scanpy BH-adjusted p < 0.05.
+    Wilcoxon, pts/logFC thresholds, and scanpy BH-adjusted p < DETECTION_ALPHA.
     Returns {domain: DataFrame} sorted by `rank_by`; each df carries the columns
-    create_svg_list consumes (`names`, `scores`/rank_by, `pvals_adj`).
+    create_svg_list consumes (`names`, `scores`/rank_by, `pvals_adj`). Same single
+    DE pass and split as compute_svg_results (which also returns the gene table).
     """
-    flat = _compute_spatial_de_table(
-        adata,
-        key=key,
-        method='wilcoxon',
-        min_pts=min_pts,
-        min_logfc=min_logfc,
-        pval_adjust='scanpy',
-        pval_thresh=0.05,
-        filter_mode='drop',
-        dedup_spots=dedup_spots,
+    flat = _de_table_all(adata, key, dedup_spots)
+    return _split_de_table(flat, min_pts, min_logfc, rank_by)[0]
+
+
+GENE_TABLE_COLUMNS = ['CombinedPvals', 'adj_pval', 'scores', 'logfoldchanges',
+                      'pts', 'pts_rest', 'best_domain', 'passes_filter']
+
+
+def _de_table_all(adata, key: str = 'domain', dedup_spots: bool = True):
+    """One Wilcoxon pass: every (gene, domain) row, unfiltered, with scanpy BH `pvals_adj`."""
+    return _compute_spatial_de_table(
+        adata, key=key, method='wilcoxon', min_pts=0.0, min_logfc=-np.inf,
+        pval_adjust='scanpy', filter_mode='none', dedup_spots=dedup_spots,
     )
-    flat = flat.rename(columns={'gene': 'names'})
 
-    results = {}
+
+def _split_de_table(flat, min_pts, min_logfc, rank_by='scores', genes=None):
+    """Split one unfiltered DE table into detection's {domain: df} and a per-gene table.
+
+    A (gene, domain) row *passes* if pts >= min_pts and logFC >= min_logfc, and is
+    *called* if it also has adjusted p < DETECTION_ALPHA.
+
+    domain_svgs : {domain: called rows sorted by rank_by} -- create_svg_list input.
+    gene_table  : one row per gene (index), columns GENE_TABLE_COLUMNS. The domain is
+        chosen as in detection: the highest-scoring called domain, else the
+        highest-scoring passing domain. Genes with no passing domain keep their
+        top-scoring domain's statistics but get adj_pval = 1, CombinedPvals = NaN,
+        passes_filter = False (a filtered gene: no p-value, never called). With
+        `genes`, every gene in it is listed (genes absent from the DE table: all-NaN
+        statistics, adj_pval = 1, passes_filter = False). Genes called at
+        adj_pval < DETECTION_ALPHA are exactly the genes of domain_svgs.
+    """
+    passes = (flat['pts'] >= min_pts) & (flat['logfoldchanges'] >= min_logfc)
+    called = passes & (flat['pvals_adj'] < DETECTION_ALPHA)
+
+    det = flat[called].rename(columns={'gene': 'names'})
     ascending = rank_by != 'scores'
-    for group, grp in flat.groupby('domain'):
-        results[group] = grp.sort_values(rank_by, ascending=ascending).reset_index(drop=True)
-    return results
+    domain_svgs = {g: d.sort_values(rank_by, ascending=ascending).reset_index(drop=True)
+                   for g, d in det.groupby('domain')}
 
-def _run_wilcoxon_permutation_per_ct(adata_ct, key, rg,
-                                      n_permutations=999, seed=0, n_workers=None):
+    p, c = flat[passes], flat[called]
+    top_c = c.loc[c.groupby('gene')['scores'].idxmax()]
+    top_p = p.loc[p.groupby('gene')['scores'].idxmax()]
+    best_pass = pd.concat([top_c, top_p[~top_p['gene'].isin(top_c['gene'])]])
+    rest = flat[~flat['gene'].isin(best_pass['gene'])]
+    top_rest = (rest.sort_values('scores', ascending=False, kind='mergesort')
+                    .drop_duplicates('gene', keep='first'))
+    t = pd.concat([best_pass.assign(passes_filter=True),
+                   top_rest.assign(passes_filter=False)])
+    t = t.set_index('gene').rename(columns={'pval': 'CombinedPvals', 'pvals_adj': 'adj_pval',
+                                            'domain': 'best_domain'})
+    if genes is not None:
+        t = t.reindex(pd.Index(genes).astype(str))
+    t['passes_filter'] = t['passes_filter'].fillna(False).astype(bool)
+    t.loc[~t['passes_filter'], 'adj_pval'] = 1.0
+    t.loc[~t['passes_filter'], 'CombinedPvals'] = np.nan
+    t.index.name = 'gene'
+    return domain_svgs, t.sort_index()[GENE_TABLE_COLUMNS]
+
+
+def compute_svg_results(adata,
+                        key: str = 'domain',
+                        min_pts: float = 0.8,
+                        min_logfc: float = 1.5,
+                        rank_by: str = 'scores',
+                        dedup_spots: bool = True):
+    """Detection and per-gene scores from ONE Wilcoxon pass.
+
+    Returns (domain_svgs, gene_table): domain_svgs is detection's {domain: df}
+    (create_svg_list(domain_svgs) is the SVG list); gene_table lists every gene of
+    `adata` with its best domain, adj_pval / CombinedPvals and passes_filter -- the
+    benchmarking format (see _split_de_table). Both use the same rows, so genes
+    with adj_pval < DETECTION_ALPHA are exactly the detected genes.
     """
-    Wilcoxon one-vs-rest with permutation-corrected empirical p-values.
+    genes = adata.var_names.astype(str)
+    flat = _de_table_all(adata, key, dedup_spots)
+    return _split_de_table(flat, min_pts, min_logfc, rank_by, genes)
 
-    Precomputes gene ranks once, splits permutations into batches, and dispatches
-    batches to multiple worker processes via ProcessPoolExecutor. Each worker
-    receives only numpy arrays (no AnnData), so pickling is cheap.
 
-    Returns one row per (gene, domain) for all genes (no pts/logfc filter).
-    Columns: gene, domain, scores, logfoldchanges, pts, pts_rest, pval.
-    """
-    from scipy.sparse import issparse
-    from scipy.stats import rankdata as _rankdata
+def compute_ct_svg_results(cell_type: str, **kwargs):
+    """compute_svg_results on one cell type's spatial data (ct-SVGs)."""
+    return compute_svg_results(load_ct_spatial_data(cell_type), **kwargs)
 
-    X = adata_ct.X.toarray() if issparse(adata_ct.X) else np.asarray(adata_ct.X)
-    X = X.astype(np.float32)
-    n_cells, n_genes = X.shape
-    gene_names = list(adata_ct.var_names)
 
-    domains = adata_ct.obs[key].values
-    unique_domains = np.unique(domains)
-    n_domains = len(unique_domains)
-    domain_to_idx = {d: i for i, d in enumerate(unique_domains)}
-    gene_to_idx = {g: i for i, g in enumerate(gene_names)}
+def compute_tissue_svg_results(**kwargs):
+    """compute_svg_results on the spot-level (aggregated) ST data (tissue SVGs)."""
+    return compute_svg_results(load_aggr_st_data(), **kwargs)
 
-    # Precompute per-gene ranks across all cells once — shared across all workers
-    ranks = np.apply_along_axis(_rankdata, 0, X).astype(np.float32)  # (n_cells, n_genes)
-
-    # Observed rank sums and expected values under null
-    obs_W = np.zeros((n_domains, n_genes), dtype=np.float64)
-    n1 = np.zeros(n_domains, dtype=int)
-    for i, d in enumerate(unique_domains):
-        mask = domains == d
-        n1[i] = mask.sum()
-        obs_W[i] = ranks[mask].sum(axis=0)
-
-    mu = (n1 * (n_cells + 1) / 2.0)[:, None]   # (n_domains, 1)
-    obs_dev = np.abs(obs_W - mu)                 # (n_domains, n_genes)
-
-    # Distribute permutations evenly across workers
-    n_workers = n_workers or os.cpu_count() or 1
-    n_workers = min(n_workers, n_permutations)
-    base, remainder = divmod(n_permutations, n_workers)
-    batches = [
-        (ranks, domains, unique_domains, obs_dev, mu, base + (1 if i < remainder else 0), seed + i)
-        for i in range(n_workers)
-    ]
-
-    if n_workers == 1:
-        results = [_permutation_worker(*batches[0])]
-    else:
-        with ProcessPoolExecutor(max_workers=n_workers) as executor:
-            futures = [executor.submit(_permutation_worker, *b) for b in batches]
-            results = [f.result() for f in futures]
-
-    exceed_count = sum(results)  # (n_domains, n_genes)
-
-    # Empirical two-sided p-values
-    perm_pvals = (exceed_count + 1) / (n_permutations + 1)  # (n_domains, n_genes)
-
-    # Collect Wilcoxon scores, logfc, pts, pts_rest from scanpy results
-    all_df = _run_wilcoxon_per_domain(adata_ct, key, rg)
-
-    # Replace theoretical p-values with empirical ones
-    all_df['pvals'] = [
-        perm_pvals[domain_to_idx[d], gene_to_idx[g]]
-        for g, d in zip(all_df['names'], all_df['domain'])
-    ]
-
-    all_df.rename(columns={'names': 'gene', 'pvals': 'pval'}, inplace=True)
-    return all_df[['gene', 'domain', 'scores', 'logfoldchanges', 'pts', 'pts_rest', 'pval']]
 
 
 def _run_wilcoxon_per_domain(adata_ct, key, rg):
@@ -366,46 +325,6 @@ def _run_wilcoxon_per_domain(adata_ct, key, rg):
     return pd.concat(domain_dfs, ignore_index=True)
 
 
-def _run_kruskal_per_ct(adata_ct, key, rg, min_pts, min_logfc):
-    """KW omnibus p-value per gene + Wilcoxon best-domain annotation.
-
-    Uses rank_genes_groups results already stored in rg for best-domain
-    annotation (scores, logfc, pts, pts_rest, domain), and replaces the
-    per-domain Wilcoxon p-value with a single KW omnibus p-value per gene.
-    All genes are returned (no hard filter); passes_filter marks genes that
-    meet the pts/logfc criteria.
-    """
-    from scipy import stats
-    from scipy.sparse import issparse
-
-    X = adata_ct.X.toarray() if issparse(adata_ct.X) else adata_ct.X
-    domains = adata_ct.obs[key].values
-    unique_domains = np.unique(domains)
-
-    kw_pvals = []
-    for g_idx in range(X.shape[1]):
-        expr = X[:, g_idx]
-        if expr.std() == 0:
-            kw_pvals.append(1.0)
-            continue
-        groups = [expr[domains == d] for d in unique_domains]
-        try:
-            _, pval = stats.kruskal(*groups)
-        except ValueError:
-            pval = 1.0
-        kw_pvals.append(pval)
-    kw_pval = dict(zip(adata_ct.var_names, kw_pvals))
-
-    all_domains = _run_wilcoxon_per_domain(adata_ct, key, rg)
-    best = all_domains.loc[all_domains.groupby('names')['scores'].idxmax()].copy()
-    best.rename(columns={'names': 'gene', 'pvals': 'wilcoxon_pval'}, inplace=True)
-    best['pval'] = best['gene'].map(kw_pval)
-    best['passes_filter'] = (
-        (best['pts'] >= min_pts) & (best['logfoldchanges'] >= min_logfc)
-    )
-    return best[['gene', 'domain', 'scores', 'logfoldchanges',
-                 'pts', 'pts_rest', 'pval', 'passes_filter']]
-
 
 def _ct_safe(ct: str) -> str:
     return ct.replace(' ', '_').replace('+', '_').replace('/', '_')
@@ -417,58 +336,24 @@ def compute_ct_svg_scores(
     min_pts: float = 0.8,
     min_logfc: float = 1.5,
     method: str = 'wilcoxon',
-    pval_adjust: str = 'scanpy',
-    n_permutations: int = 999,
-    permutation_seed: int = 0,
-    n_workers: int = None,
     dedup_spots: bool = True,
     best_domain_per_gene: bool = False,
 ):
     """
     Score genes for ctSVG detection and save per-CT results.
 
-    method='wilcoxon' (default):
-        Runs Wilcoxon one-vs-rest per domain, keeps only genes passing
-        pts >= min_pts and logfoldchanges >= min_logfc.
-        Output: one row per (gene, domain) pair that passes the filter.
-        Columns: gene, domain, scores, logfoldchanges, pts, pts_rest, pval.
-
-    method='kruskal':
-        Runs Kruskal-Wallis (omnibus across all domains) for the p-value, and
-        Wilcoxon one-vs-rest to annotate the best domain per gene.
-        All genes are written; passes_filter marks the pts/logfc criteria.
-        Columns: gene, domain, scores, logfoldchanges, pts, pts_rest, pval,
-                 passes_filter.
-
-    method='wilcoxon_permutation':
-        Runs Wilcoxon one-vs-rest, but replaces the normal-approximation p-value
-        with an empirical permutation p-value. Domain labels are shuffled
-        n_permutations times; the empirical p-value is the fraction of shuffles
-        where the permuted rank sum deviated from the null mean at least as much
-        as the observed. Corrects for type-I error inflation caused by
-        expression-derived clustering. No pts/logfc filter is applied — all
-        (gene, domain) pairs are written.
-        Columns: gene, domain, scores, logfoldchanges, pts, pts_rest, pval.
+    Wilcoxon one-vs-rest per domain (method='wilcoxon', the only test; the
+    parameter stays for existing calls), keeping (gene, domain) rows that pass
+    pts >= min_pts and logfoldchanges >= min_logfc, with scanpy's per-domain
+    BH-adjusted p-value (pvals_adj).
+    Columns: gene, domain, scores, logfoldchanges, pts, pts_rest, pval, pvals_adj.
 
     dedup_spots (default True): collapse same-spot same-CT duplicate cells to one
-        representative before scoring, so the Wilcoxon/KW test and pts treat each spot
-        as one observation instead of N identical replicates (aligns with the detection
-        path compute_domain_ct_svgs). Guarded -> no-op if cells genuinely vary. Set
-        False to score on all cells (real per-cell expression benchmarks).
+        representative before scoring (as detection does). Guarded -> no-op if
+        cells genuinely vary. Set False for real per-cell expression benchmarks.
 
-    best_domain_per_gene (default False): output granularity. False keeps the full
-        gene list (one row per passing gene-domain); True collapses to one row per
-        gene, its max-Wilcoxon-score domain. (kruskal already returns best-domain-
-        per-gene -- its p-value is a single omnibus per gene -- so the flag is a no-op
-        there.)
-
-    pval_adjust (default 'scanpy'): how compile_ct_svg_scores derives adj_pval.
-        'scanpy' carries scanpy's inline BH-adjusted p-value (pvals_adj) through to
-        the raw CSV, aligning scoring with the detection path (compute_domain_ct_svgs),
-        which uses the same adjustment. Only defined for method='wilcoxon'; kruskal /
-        wilcoxon_permutation have no scanpy pvals_adj, so they fall back to 'none'
-        (compile applies its own best-domain BH). 'none' forces compile-step BH for
-        any method.
+    best_domain_per_gene (default False): False keeps one row per passing
+        gene-domain; True collapses to one row per gene (max-score domain).
 
     Output filenames: <ct_safe>_raw.csv  (default dir: ProjectMetadata().domain_markers_dir)
     Run compile_ct_svg_scores() to aggregate and finalize adj_pval.
@@ -477,15 +362,8 @@ def compute_ct_svg_scores(
     out_dir = Path(out_dir) if out_dir is not None else project_metadata.domain_markers_dir
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # scoring path: same engine as detection, but no inline
-    # p-value filter (BH is deferred to compile_ct_svg_scores). filter_mode keeps
-    # each method's granularity -- wilcoxon drops non-passing genes; kruskal keeps
-    # all and annotates passes_filter; permutation keeps all (empirical p stands).
-    filter_mode = {'kruskal': 'annotate', 'wilcoxon_permutation': 'none'}.get(method, 'drop')
-    # scanpy inline BH (pvals_adj) is only defined for the Wilcoxon test; for the
-    # other statistics there is no scanpy-adjusted p-value, so defer to compile-BH.
-    eff_adjust = pval_adjust if method == 'wilcoxon' else 'none'
-
+    # scoring path: same engine as detection, but no inline p-value filter
+    # (compile_ct_svg_scores picks each gene's domain with the detection rule).
     for ct in project_metadata.ct_list:
         adata_ct = load_ct_spatial_data(ct)
         result = _compute_spatial_de_table(
@@ -495,13 +373,9 @@ def compute_ct_svg_scores(
             min_pts=min_pts,
             min_logfc=min_logfc,
             require_specificity=False,
-            pval_adjust=eff_adjust,
-            filter_mode=filter_mode,
+            filter_mode='drop',
             best_domain_per_gene=best_domain_per_gene,
             dedup_spots=dedup_spots,
-            n_permutations=n_permutations,
-            permutation_seed=permutation_seed,
-            n_workers=n_workers,
         )
         result.to_csv(out_dir / f'{_ct_safe(ct)}_raw.csv', index=False)
 
@@ -517,11 +391,14 @@ def compile_ct_svg_scores(
 
     Reads <ct_safe>_raw.csv files written by compute_ct_svg_scores(), then
     for each cell type:
-      1. Selects the best domain per gene (max Wilcoxon score).
-      2. Finalizes adj_pval: if the raw file carries scanpy's pvals_adj
-         (pval_adjust='scanpy', the default -- aligned with detection), the best
-         domain's scanpy-adjusted p-value is used directly; otherwise a per-CT BH
-         correction is applied to the raw p-values of surviving genes.
+      1. Selects the best domain per gene as detection does: the highest-scoring
+         domain among those with adjusted p < DETECTION_ALPHA; a gene with no
+         significant domain keeps its top-scoring domain (adj_pval >= alpha), so
+         every gene still has one p-value to rank by. Genes called at alpha are
+         therefore exactly detection's (compute_domain_ct_svgs) at the same
+         thresholds.
+      2. adj_pval = that domain's scanpy BH-adjusted p-value (pvals_adj),
+         CombinedPvals = its raw p-value.
       3. Writes one benchmarking CSV per cell type.
 
     Default in_dir and out_dir: ProjectMetadata().domain_markers_dir
@@ -529,8 +406,6 @@ def compile_ct_svg_scores(
     Output columns per gene: CombinedPvals, adj_pval, scores, logfoldchanges,
                               pts, pts_rest, best_domain.
     """
-    from statsmodels.stats.multitest import multipletests
-
     project_metadata = ProjectMetadata()
     in_dir  = Path(in_dir)  if in_dir  is not None else project_metadata.domain_markers_dir
     out_dir = Path(out_dir) if out_dir is not None else project_metadata.domain_markers_dir
@@ -542,109 +417,28 @@ def compile_ct_svg_scores(
             continue
         df = pd.read_csv(raw_csv)
 
-        best = df.loc[df.groupby('gene')['scores'].idxmax()].copy()
-        best = best.set_index('gene')
+        out_cols = ['CombinedPvals', 'adj_pval', 'scores', 'logfoldchanges',
+                    'pts', 'pts_rest', 'best_domain']
+        if 'pvals_adj' not in df.columns:
+            raise ValueError(f"{raw_csv} has no pvals_adj column (written by an older "
+                             "compute_ct_svg_scores); re-run compute_ct_svg_scores.")
+        top = df.loc[df.groupby('gene')['scores'].idxmax()]
+        sig = df[df['pvals_adj'] < DETECTION_ALPHA]
+        top_sig = sig.loc[sig.groupby('gene')['scores'].idxmax()]
+        best = pd.concat([top_sig, top[~top['gene'].isin(top_sig['gene'])]])
+        best = best.set_index('gene').sort_index()
         if best.empty:
-            out_cols = ['CombinedPvals', 'adj_pval', 'scores', 'logfoldchanges',
-                        'pts', 'pts_rest', 'best_domain']
-            if 'passes_filter' in df.columns:
-                out_cols.append('passes_filter')
             pd.DataFrame(columns=out_cols).to_csv(out_dir / f'{_ct_safe(ct)}.csv')
             continue
         best['CombinedPvals'] = best['pval']
-        if 'pvals_adj' in best.columns:
-            # scanpy inline BH carried through from compute_ct_svg_scores(pval_adjust=
-            # 'scanpy'): use the best domain's scanpy-adjusted p-value directly, so
-            # scoring shares the detection path's adjustment (no compile-step BH).
-            best['adj_pval'] = best['pvals_adj'].values
-        else:
-            _, adj_pvals, _, _ = multipletests(best['pval'].values, method='fdr_bh')
-            best['adj_pval'] = adj_pvals
-        if 'passes_filter' in best.columns:
-            best.loc[~best['passes_filter'].astype(bool), 'adj_pval'] = 1.0
+        best['adj_pval'] = best['pvals_adj'].values
         best.rename(columns={'domain': 'best_domain'}, inplace=True)
-        out_cols = ['CombinedPvals', 'adj_pval', 'scores', 'logfoldchanges',
-                    'pts', 'pts_rest', 'best_domain']
-        if 'passes_filter' in best.columns:
-            out_cols.append('passes_filter')
         best[out_cols].to_csv(out_dir / f'{_ct_safe(ct)}.csv')
 
     logger.info(f"Compiled per-CT SVG scores to {out_dir}")
 
 
-def compute_ct_domain_svg_scores(
-    out_dir: Path,
-    key: str = 'domain',
-):
-    """
-    Compute per-(gene, cell type, domain) scores — unfiltered, one file per domain.
 
-    Same Wilcoxon as compute_ct_svg_scores but does NOT aggregate across domains.
-    A gene can appear in multiple domain files. BH correction applied per domain.
-    Writes <ct_safe>_domain_<domain>.csv per (CT, domain).
-    Columns: CombinedPvals, adj_pval, scores, logfoldchanges, pts.
-
-    Use filter_svg_scores() to apply score/logfc/pts thresholds afterwards.
-    """
-    from statsmodels.stats.multitest import multipletests
-
-    project_metadata = ProjectMetadata()
-    out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    for ct in project_metadata.ct_list:
-        adata_ct = load_ct_spatial_data(ct)
-        sc.tl.rank_genes_groups(adata_ct, groupby=key, method='wilcoxon',
-                                corr_method='benjamini-hochberg', pts=True, use_raw=True)
-        rg = adata_ct.uns['rank_genes_groups']
-        all_domains = _run_wilcoxon_per_domain(adata_ct, key, rg)
-
-        for domain, grp in all_domains.groupby('domain'):
-            grp = grp.set_index('names').copy()
-            grp.index.name = 'gene'
-            _, adj_pvals, _, _ = multipletests(grp['pvals'].values, method='fdr_bh')
-            grp['CombinedPvals'] = grp['pvals']
-            grp['adj_pval']      = adj_pvals
-            grp[['CombinedPvals', 'adj_pval', 'scores',
-                  'logfoldchanges', 'pts']].to_csv(
-                out_dir / f'{_ct_safe(ct)}_domain_{domain}.csv'
-            )
-
-    logger.info(f"Saved per-(CT, domain) score files to {out_dir}")
-
-
-def filter_svg_scores(
-    in_dir: Path,
-    out_dir: Path,
-    # min_score: float = 0.0,
-    # min_logfc: float = 0.0,
-    min_pts: float = 0.0,
-    min_logfc: float = 0.0,
-):
-    """
-    Filter CSV files produced by compute_ct_svg_scores or compute_ct_domain_svg_scores.
-
-    Reads all *.csv files in in_dir, applies score/logfc/pts thresholds,
-    and writes filtered versions to out_dir (same filenames).
-    """
-    project_metadata = ProjectMetadata()
-    in_dir  = Path(in_dir)
-    out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    for ct in project_metadata.ct_list:
-        csv = in_dir / f'{_ct_safe(ct)}.csv'
-        if not csv.exists():
-            continue
-        df = pd.read_csv(csv, index_col=0)
-        mask = (
-            # (df['scores']          >= min_score) &
-            (df['pts']             >= min_pts) &
-            (df['logfoldchanges']  >= min_logfc)
-        )
-        df[mask].to_csv(out_dir / csv.name)
-
-    logger.info(f"Filtered CSVs written to {out_dir}")
 
 def create_svg_list(
     domain_svgs, 

@@ -39,14 +39,12 @@ from .pipeline import (
     HypergraphEmbedderArgs,
     HyperSpotClustering,
     run_eval,
-    compute_domain_svgs,
-    compute_domain_ct_svgs,
     create_svg_list,
 )
 
 from .pipeline.selection import (
-    compute_ct_svg_scores,
-    compile_ct_svg_scores,
+    compute_tissue_svg_results,
+    compute_ct_svg_results,
 )
 
 app = App(name="hyperspot")
@@ -93,27 +91,33 @@ class CTClusterArgs:                # cell-type domains
     min_cluster_pct: float = -1     # min fraction of the cell type's CELLS per domain; OFF by default (dedup fixes the over-clustering it patched)
     dedup_spots: bool = True        # collapse same-spot same-CT duplicate cells before clustering (Spotiphy); guarded -> auto no-op on real per-cell variation. Set False for true-counts / per-cell data.
 
+_GENE_SCORES_HELP = ("Also write a per-gene table (*_scores.csv) for benchmarking: every gene with its "
+                     "best domain, adj_pval, raw p (CombinedPvals) and passes_filter. Genes failing "
+                     "min-pts/min-logfc get adj_pval 1 and no p-value.")
+
 @dataclass(kw_only=True)
 class SVGArgs:
     key: Annotated[str, Parameter(help="obs column holding the domain labels.")] = "domain"
     min_pts: Annotated[float, Parameter(help="Keep genes expressed in >= this fraction of the domain.")] = 0.8
     min_logfc: Annotated[float, Parameter(help="Keep genes with >= this log fold-change vs the rest.")] = 1.5
-    output_dir: Annotated[Optional[str], Parameter(help="Directory for the score CSVs (default PROJECT/domain_markers).")] = None
+    gene_scores: Annotated[bool, Parameter(help=_GENE_SCORES_HELP)] = False
+    output_dir: Annotated[Optional[str], Parameter(help="Directory for the SVG CSVs (default PROJECT/svgs).")] = None
 
 @dataclass(kw_only=True)
 class CTSVGArgs:
+    cell_types: Annotated[Optional[List[str]], Parameter(consume_multiple=True, help="Restrict to these cell types (default: all).")] = None
     key: Annotated[str, Parameter(help="obs column holding the domain labels.")] = "domain"
     min_pts: Annotated[float, Parameter(help="Keep genes expressed in >= this fraction of the domain.")] = 0.8
     min_logfc: Annotated[float, Parameter(help="Keep genes with >= this log fold-change vs the rest.")] = 1.5
     dedup_spots: Annotated[bool, Parameter(help="Collapse same-spot duplicate cells before the test.")] = True
-    output_dir: Annotated[Optional[str], Parameter(help="Directory for the score CSVs (default PROJECT/domain_markers).")] = None
+    gene_scores: Annotated[bool, Parameter(help=_GENE_SCORES_HELP)] = False
+    output_dir: Annotated[Optional[str], Parameter(help="Directory for the ct-SVG CSVs (default PROJECT/svgs).")] = None
 
 # Command order in --help (sort_key), in steps of 10 so new commands slot in:
 #   10 init-project-files-dir   20 train-embedder   30 make-embedding
 #   40 compute-spatial-domains  50 compute-celltype-spatial-domains
 #   60 compute-svgs             70 compute-ct-svgs
-#   80 (reserved: score-svgs)   90 (reserved: score-ct-svgs)
-#  100 (reserved: run-all)      110 perform-model-evaluation
+#   80 (reserved: run-all)      90 perform-model-evaluation
 # 1000 folder-test (always last)
 @app.command(help="Create a project files directory.",
              sort_key=10)
@@ -185,7 +189,7 @@ def compute_spatial_domains(
     clustering: ClusterArgs = ClusterArgs(),
     copy_var_cols: Annotated[
         Optional[List[str]], 
-        Parameter(help="var columns to copy from the decomposed AnnData into the aggregated AnnData.")] = None,
+        Parameter(consume_multiple=True, help="var columns to copy from the decomposed AnnData into the aggregated AnnData.")] = None,
     common: CommonArgs = CommonArgs(),
 ):
 
@@ -217,69 +221,44 @@ def compute_celltype_spatial_domains(
         seed = common.seed,
     )
 
-@app.command(help="Detect tissue-level spatially variable genes (SVGs) for the ST spatial domains -> svgs_ST.csv. Requires spatial domains first (compute-spatial-domains).",
+@app.command(help="Detect tissue-level SVGs per tissue domain -> svgs_ST.csv "
+                  "(with --svg.gene-scores also svgs_ST_scores.csv). Requires compute-spatial-domains.",
              sort_key=60)
-def compute_svgs(
-    project: ProjectArgs,
-    key: Annotated[str, Parameter(help="obs column holding the domain labels.")] = 'domain',
-    min_pts: Annotated[float, Parameter(help="Keep genes expressed in >= this fraction of the domain.")] = 0.8,
-    min_logfc: Annotated[float, Parameter(help="Keep genes with >= this log fold-change vs the rest.")] = 1.5,
-    rank_by: Annotated[str, Parameter(help="Ranking statistic for the SVG list.")] = 'scores',
-    dedup_spots: Annotated[bool, Parameter(help="Collapse same-spot duplicate cells before the test (Spotiphy).")] = True,
-    output_dir: Annotated[Optional[str], Parameter(help="Directory for the SVG CSV (default PROJECT/svgs).")] = None,
-):
-    ProjectMetadata(project.project_dir)
-    out = Path(output_dir) if output_dir else ProjectMetadata().project_folder / "svgs"
+def compute_svgs(project: ProjectArgs, svg: SVGArgs = SVGArgs()):
+    pm = ProjectMetadata(project.project_dir)
+    out = Path(svg.output_dir) if svg.output_dir else pm.project_folder / "svgs"
     out.mkdir(parents=True, exist_ok=True)
 
-    svgs = compute_domain_svgs(key=key, min_pts=min_pts, min_logfc=min_logfc,
-                               rank_by=rank_by, dedup_spots=dedup_spots)
-    create_svg_list(svgs, rank_by=rank_by).to_csv(out / "svgs_ST.csv")
+    domain_svgs, gene_table = compute_tissue_svg_results(
+        key=svg.key, 
+        min_pts=svg.min_pts, 
+        min_logfc=svg.min_logfc)
+    create_svg_list(domain_svgs).to_csv(out / "svgs_ST.csv")
     logger.info(f"SVGs -> {out / 'svgs_ST.csv'}")
+    if svg.gene_scores:
+        gene_table.to_csv(out / "svgs_ST_scores.csv")
+        logger.info(f"gene scores -> {out / 'svgs_ST_scores.csv'}")
 
-@app.command(
-    help="Detect cell-type-specific SVGs (ctSVGs): domain-marker genes per cell type -> svgs_ct_{ct}.csv. Default: all cell types; --cell-types limits to a subset. Requires per-CT domains first (compute-celltype-spatial-domains).",         
-    sort_key=70)
-def compute_ct_svgs(
-    project: ProjectArgs,
-    cell_types: Annotated[Optional[List[str]], Parameter(help="Restrict ctSVG detection to these cell types (default: all).")] = None,
-    key: Annotated[str, Parameter(help="obs column holding the domain labels.")] = 'domain',
-    min_pts: Annotated[float, Parameter(help="Keep genes expressed in >= this fraction of the domain.")] = 0.8,
-    min_logfc: Annotated[float, Parameter(help="Keep genes with >= this log fold-change vs the rest.")] = 1.5,
-    rank_by: Annotated[str, Parameter(help="Ranking statistic for the SVG list.")] = 'scores',
-    dedup_spots: Annotated[bool, Parameter(help="Collapse same-spot duplicate cells before the test (Spotiphy).")] = True,
-    output_dir: Annotated[Optional[str], Parameter(help="Directory for the ctSVG CSVs (default PROJECT/svgs).")] = None,
-):
-    ProjectMetadata(project.project_dir)
-    pm = ProjectMetadata()
-    out = Path(output_dir) if output_dir else pm.project_folder / "svgs"
+@app.command(help="Detect cell-type-specific SVGs per ct-domain -> svgs_ct_{ct}.csv "
+                  "(with --ctsvg.gene-scores also svgs_ct_{ct}_scores.csv). "
+                  "Requires compute-celltype-spatial-domains.",
+             sort_key=70)
+def compute_ct_svgs(project: ProjectArgs, ctsvg: CTSVGArgs = CTSVGArgs()):
+    pm = ProjectMetadata(project.project_dir)
+    out = Path(ctsvg.output_dir) if ctsvg.output_dir else pm.project_folder / "svgs"
     out.mkdir(parents=True, exist_ok=True)
 
-    types = cell_types if cell_types else pm.ct_list
-    for ct in types:
-        ct_svgs = compute_domain_ct_svgs(ct, key=key, min_pts=min_pts, min_logfc=min_logfc,
-                                         rank_by=rank_by, dedup_spots=dedup_spots)
-        create_svg_list(ct_svgs, rank_by=rank_by).to_csv(out / f"svgs_ct_{ct}.csv")
-        logger.info(f"ctSVGs [{ct}] -> {out / ('svgs_ct_' + ct + '.csv')}")
+    for ct in (ctsvg.cell_types or pm.ct_list):
+        domain_svgs, gene_table = compute_ct_svg_results(
+            ct, key=ctsvg.key, min_pts=ctsvg.min_pts, min_logfc=ctsvg.min_logfc,
+            dedup_spots=ctsvg.dedup_spots)
+        create_svg_list(domain_svgs).to_csv(out / f"svgs_ct_{ct}.csv")
+        logger.info(f"ctSVGs [{ct}] -> {out / f'svgs_ct_{ct}.csv'}")
+        if ctsvg.gene_scores:
+            gene_table.to_csv(out / f"svgs_ct_{ct}_scores.csv")
+            logger.info(f"gene scores [{ct}] -> {out / f'svgs_ct_{ct}_scores.csv'}")
 
-@app.command(
-    help="Score ctSVGs: per cell type, each gene passing --min-pts/--min-logfc " 
-         "with its best ct-domain and BH-adjusted p-value -> {ct}.csv (plus per-domain {ct}_raw.csv). "
-         "Requires per-CT domains first (compute-celltype-spatial-domains).",
-    sort_key=90)
-def score_ct_svgs(
-    project: ProjectArgs,
-    ctsvg: CTSVGArgs = CTSVGArgs()
-):
-    ProjectMetadata(project.project_dir)
-    out = Path(ctsvg.output_dir) if ctsvg.output_dir else ProjectMetadata().domain_markers_dir
-    compute_ct_svg_scores(
-        out_dir=out, key=ctsvg.key, min_pts=ctsvg.min_pts, min_logfc=ctsvg.min_logfc, 
-        method="wilcoxon", dedup_spots=ctsvg.dedup_spots)
-    compile_ct_svg_scores(in_dir=ctsvg.output_dir, out_dir=ctsvg.output_dir)
-    
-
-@app.command(help="Run evaluation test.", sort_key=110)
+@app.command(help="Run evaluation test.", sort_key=90)
 def perform_model_evaluation(
     project: ProjectArgs,         
     num_epochs: Annotated[int, Parameter(help="Training epochs.")] = 1000,
