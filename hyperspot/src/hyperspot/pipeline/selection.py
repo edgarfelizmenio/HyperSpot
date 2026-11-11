@@ -136,9 +136,10 @@ def _compute_spatial_de_table(
         empirical permutation p-value.
     require_specificity : bool
         Add the pts/pts_rest > 1 term (gene detected in a larger fraction of the
-        domain than outside). Enabled by the detection wrapper, disabled by scoring
-        -- with pts >= min_pts already enforced it is near-redundant, so scoring
-        leaves it off. pts_rest == 0 counts as specific.
+        domain than outside). Off in both detection and scoring: against all other
+        cells of the type it is near-redundant once pts >= min_pts and logFC >=
+        min_logfc hold (kidney: 0.07% of ct-SVGs at 0.8/1.5). Kept only for the
+        sensitivity scripts. pts_rest == 0 counts as specific.
     pval_adjust : 'scanpy' | 'none'
         'scanpy' surfaces scanpy's BH-adjusted p-value as `pvals_adj` and lets
         `pval_thresh` filter on it (only valid for method='wilcoxon'). 'none' reports
@@ -253,7 +254,7 @@ def compute_spatial_de_genes(adata,
     """Detection path: filtered spatial DE genes per domain, as {domain: df}.
 
     Thin wrapper over _compute_spatial_de_table with the detection configuration:
-    Wilcoxon, specificity on (pts/pts_rest > 1), and scanpy BH-adjusted p < 0.05.
+    Wilcoxon, pts/logFC thresholds, and scanpy BH-adjusted p < 0.05.
     Returns {domain: DataFrame} sorted by `rank_by`; each df carries the columns
     create_svg_list consumes (`names`, `scores`/rank_by, `pvals_adj`).
     """
@@ -263,7 +264,6 @@ def compute_spatial_de_genes(adata,
         method='wilcoxon',
         min_pts=min_pts,
         min_logfc=min_logfc,
-        require_specificity=True,
         pval_adjust='scanpy',
         pval_thresh=0.05,
         filter_mode='drop',
@@ -477,7 +477,7 @@ def compute_ct_svg_scores(
     out_dir = Path(out_dir) if out_dir is not None else project_metadata.domain_markers_dir
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # scoring path: same engine as detection, but specificity off and no inline
+    # scoring path: same engine as detection, but no inline
     # p-value filter (BH is deferred to compile_ct_svg_scores). filter_mode keeps
     # each method's granularity -- wilcoxon drops non-passing genes; kruskal keeps
     # all and annotates passes_filter; permutation keeps all (empirical p stands).
