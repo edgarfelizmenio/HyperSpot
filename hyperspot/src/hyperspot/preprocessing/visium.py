@@ -12,18 +12,21 @@ from ..utils import load_ct_spatial_data, save_ct_spatial_data, load_decomposed_
 
 
 def build_hyperedge_feats(adata_st, spot_name_to_index, n_hyperedge_feats=256):
-    """Spot-basis pseudobulk reconstruction target for hyperedge embeddings.
+    """Per-spot pseudobulk target for the hyperedge reconstruction head.
 
-    A hyperedge is 1:1 with a spot; its embedding is decoded to predict that
-    *center spot's own* composition (not the smoothed neighborhood — see design
-    notes: predicting the center from the neighborhood is a non-circular pretext
-    and avoids reinforcing tissue-level over-smoothing).
+    Hyperedge s is 1:1 with spot s. Its members are the cells of spot s and of
+    its k-1 nearest spots (knn_graph with loop=True). The decoder pools the
+    embeddings of all members and predicts spot s's own pseudobulk from them.
+    Spot s's cells are among the pooled members, so the target is partly
+    reconstructed from those cells' own embeddings; it is not a prediction of
+    the centre spot from its neighbours alone.
 
-    Steps: sum decomposed cells per spot in the shared decomposition gene space
-    -> size-normalize per spot (÷ its cell count, then log1p, so the target is
-    composition not neighborhood size) -> keep the top-N genes by variance across
-    spots (a small *global* HVG set, selected on the pseudobulk itself so the
-    genes actually vary at the level being reconstructed).
+    Steps: sum the decomposed cells of each spot in the decomposition gene space
+    -> divide by the spot's cell count, then log1p (mean expression per cell, so
+    the target does not scale with how many cells the spot has) -> keep the
+    top-N highly variable genes across spots (scanpy, seurat flavor, computed on
+    this pseudobulk so the genes vary at the spot level). Spots without
+    decomposed cells get an all-zero row, which the loss excludes.
 
     Returns (feats  [n_spots × N], selected_genes  [N]).
     """
@@ -44,10 +47,6 @@ def build_hyperedge_feats(adata_st, spot_name_to_index, n_hyperedge_feats=256):
 
     pb_norm = np.log1p(pb / np.where(counts > 0, counts, 1.0)[:, None])   # composition
     pb_ad = ad.AnnData(pb_norm)
-    
-    # small global HVG set: top-N by variance of the (normalized) pseudobulk
-    # n_hvg = min(n_hyperedge_feats, pb_norm.shape[1])
-    # top = np.sort(np.argsort(pb_norm.var(axis=0))[::-1][:n_hvg])
     sc.pp.highly_variable_genes(pb_ad, n_top_genes=n_hyperedge_feats, flavor="seurat")
     top = np.where(pb_ad.var["highly_variable"].values)[0]
     return torch.tensor(pb_norm[:, top], dtype=torch.float), list(genes[top])
