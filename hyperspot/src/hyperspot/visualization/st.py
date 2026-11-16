@@ -3,21 +3,25 @@ import squidpy as sq
 import matplotlib.pyplot as plt
 
 from ..metadata import ProjectMetadata
-from ..utils import load_orig_st_data, load_aggr_st_data
+from ..utils import load_orig_st_data, load_aggr_st_data, spatial_shape
 
 def plot_st_gene_counts(figsize: tuple = (4, 4),
                         show_title: bool = True,
                         display = False,
                         save = True,
                         transparent = True,
-                        file_ext = 'png'):
+                        file_ext = 'png',
+                        shape = "auto"):
 
     project_metadata = ProjectMetadata()
-    
+
     fig, ax = plt.subplots(nrows=1, ncols=1, figsize=figsize)
     adata_st = load_orig_st_data()
+    # spot marker: "auto" -> circle if an H&E is registered else plain points; pass "hex"/"square"/None to override.
+    _shape = spatial_shape(adata_st) if shape == "auto" else shape
     sq.pl.spatial_scatter(
         adata_st,
+        shape=_shape,
         color="n_genes_by_counts", # or a gene name
         title = 'ST Data',
         ax = ax,
@@ -45,15 +49,19 @@ def plot_aggr_st_domains(figsize: tuple = (4, 4),
                          display = False,
                          save=True,
                          transparent=True,
-                         file_ext = 'png'):
+                         file_ext = 'png',
+                         shape = "auto"):
 
     project_metadata = ProjectMetadata()
 
     adata_aggr = load_aggr_st_data()
 
     fig, ax = plt.subplots(nrows=1, ncols=1, figsize=figsize)
+    # spot marker: "auto" -> circle if H&E registered else plain points; pass "hex"/"square"/None to override.
+    _shape = spatial_shape(adata_aggr) if shape == "auto" else shape
     sq.pl.spatial_scatter(
         adata_aggr,
+        shape=_shape,
         color="domain", # or a gene name
         title='Spatial Domains',
         legend_loc="on data",

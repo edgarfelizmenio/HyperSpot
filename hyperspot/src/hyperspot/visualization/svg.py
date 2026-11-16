@@ -8,6 +8,7 @@ import squidpy as sq
 from pathlib import Path
 
 from ..metadata import ProjectMetadata
+from ..utils import var_symbols, spatial_shape
 
 def plot_region(adata, region_id, ax, region_key="domain"):
     sq.pl.spatial_scatter(
@@ -19,10 +20,15 @@ def plot_region(adata, region_id, ax, region_key="domain"):
 def plot_domain_svgs(adata, top_genes, regions = list[str],
                              figsize=(4, 4), n_cols = 4, use_raw=False,
                              save=True, transparent=True, file_ext='png',
-                             generic_title=False):
+                             generic_title=False, shape="auto"):
 
     project_metadata = ProjectMetadata()
-    
+
+    if len(regions) == 0 or len(top_genes) == 0:
+        print("plot_domain_svgs: no domain ct-SVGs to plot (cell type too sparse / nothing passed "
+              "threshold) — skipping.")
+        return
+
     n_rows = ((len(regions) // n_cols) + (1 if (len(regions) % n_cols) > 0 else 0)) * 2
     width, height = figsize
     fig, axes = plt.subplots(nrows=n_rows, ncols=n_cols, figsize=(width * n_cols, height * n_rows))
@@ -34,11 +40,19 @@ def plot_domain_svgs(adata, top_genes, regions = list[str],
         ax_expr = axes[row + 1][col]
         if i < len(regions):
             region = regions[i]
-            adata_region = adata[adata.obs['domain'] == str(region)]
+            # .copy(): passing an AnnData *view* to sq.pl.spatial_scatter triggers the
+            # ImplicitModificationWarning (it writes uns[color_key] onto the view).
+            adata_region = adata[adata.obs['domain'] == str(region)].copy()
             adata_plot = adata.copy()
 
-            gene_id = top_genes[top_genes['region'] == region]['scores'].idxmax()
-            gene_name = adata.var.loc[gene_id]['SYMBOL']
+            # guard regions left empty by create_svg_list's winner-take-all merge
+            # (every ct-SVG scored higher in another region) — idxmax on empty raises.
+            sub = top_genes[top_genes['region'] == region]
+            if len(sub) == 0:
+                fig.delaxes(ax_region); fig.delaxes(ax_expr)
+                continue
+            gene_id = sub['scores'].idxmax()
+            gene_name = var_symbols(adata).loc[gene_id]
             score = top_genes.loc[gene_id]['scores']
             
             if use_raw:
@@ -50,8 +64,11 @@ def plot_domain_svgs(adata, top_genes, regions = list[str],
             vmin = np.percentile(nz, 5)
             vmax = np.percentile(nz, 95)
             
+            # spot marker: "auto" -> circle if H&E registered else plain points; override via shape=
+            _shape = spatial_shape(adata) if shape == "auto" else shape
             sq.pl.spatial_scatter(
                 adata_region,
+                shape=_shape,
                 color='domain',
                 title=f"region {region}",
                 ax=ax_region,
@@ -60,6 +77,7 @@ def plot_domain_svgs(adata, top_genes, regions = list[str],
             expr_title = f"region {region} ct-SVG" if generic_title else f"{gene_name}: {score:0.4}"
             sq.pl.spatial_scatter(
                 adata_plot,
+                shape=_shape,
                 color = gene_id,
                 ax = ax_expr,
                 title=expr_title,
@@ -105,8 +123,10 @@ def plot_domain_de_genes(adata,
         limit = len(names)
 
     adata_plot = adata.copy()
-    if var_names_column is not None:
-        adata_plot.var_names = adata.var[var_names_column]
+    # Dataset-agnostic: rename to the display column only if it exists (kidney SYMBOL sidecar);
+    # for symbol-keyed data (no such column) the var_names already ARE the display names.
+    if var_names_column is not None and var_names_column in adata.var.columns:
+        adata_plot.var_names = adata.var[var_names_column].astype(str)
     adata_plot.var_names_make_unique()
     de_gene_idx = adata.var_names.get_indexer(names[:limit])
     genes = adata_plot.var_names[de_gene_idx]
@@ -183,7 +203,7 @@ def plot_domain_ct_svgs(adata,
 
     adata_plot = adata.copy()
     ct_svgs = ct_svgs[:limit]
-    gene_names = adata.var.loc[ct_svgs]['SYMBOL'].tolist()
+    gene_names = var_symbols(adata).loc[ct_svgs].tolist()
     
     violin_ax = sc.pl.violin(
         adata_plot,
