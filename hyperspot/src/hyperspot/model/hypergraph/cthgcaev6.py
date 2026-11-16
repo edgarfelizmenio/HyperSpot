@@ -13,11 +13,11 @@ class HyperedgeDecoder(nn.Module):
     otherwise-unsupervised hyperedge embeddings a direct reconstruction signal.
     """
 
-    def __init__(self, embedding_dim, output_dim, dropout=0.0, act=nn.PReLU):
+    def __init__(self, embedding_dim, output_dim, dropout=0.0):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(embedding_dim, embedding_dim),
-            act(),
+            nn.PReLU(),
             nn.Dropout(dropout),
             nn.Linear(embedding_dim, output_dim),
         )
@@ -107,90 +107,33 @@ class CTNorm(nn.Module):
 
 
 class CTHGEncoder(nn.Module):
-    """
-    cell expression --ct transform--> cell in common space (m)
-    m (input-normalized) --node conv (node->edge)--> hyperedge embeddings
-    hyperedge emb   --hyperedge conv (edge->node)--> node/neighborhood branch (u)
-    fuse(u, m) --> final node embeddings (D)
+    """Heterogeneous hypergraph encoder (manuscript Eq. 2).
 
-    u (neighborhood) and m (own-expression skip) are each normalized (fuse_norm)
-    then combined by skip_mode: "add" (residual u+m), "concat" (learned MLP), or
-    "cross" (2-token self-attention). input_norm normalizes m before the conv.
+      P0  = PerCTTransform(X, c)             per-cell-type linear projection to d
+      P0~ = PerCTNorm(P0, c)                 CTNorm, applied before the aggregation only
+      h   = node -> hyperedge convolution    hyperedge embeddings
+      P   = hyperedge -> node convolution    neighbourhood branch
+      Z   = LN_P(P) + LN_0(P0)               residual fusion; the skip uses the unnormalised P0
+
+    Returns (Z, h, LN_P(P)).
     """
 
-    def __init__(self, n_cell_types, input_dim, embedding_dim, dropout=0.1,
-                 skip_source="common", skip_mode="add", fuse_norm="layer",
-                 input_norm="ct", reuse_input_norm=False, num_heads=2):
+    def __init__(self, n_cell_types, input_dim, embedding_dim):
         super().__init__()
-        assert skip_source in ("common", "expression")
-        assert skip_mode in ("concat", "add", "cross")
-        assert fuse_norm in ("none", "layer", "ct")
-        self.skip_source = skip_source
-        self.skip_mode = skip_mode          # how u (neighborhood) and m (skip) combine
-        self.fuse_norm = fuse_norm          # per-branch normalization before combining
-        self.input_norm = input_norm        # per-CT norm of m BEFORE the aggregation
-        # if True, the input-normalized m (m_in) is REUSED for the skip branch and
-        # the skip is NOT normalized again at fusion. "normalize m once, share for
-        # conv + skip" vs the default which normalizes m separately for conv
-        # (input_norm) and skip (fuse_norm).
-        self.reuse_input_norm = reuse_input_norm
         D = embedding_dim
-
-        self.W_ct = LinearDict(n_cell_types, input_dim, D, bias=True)  # ct transform
-        # Per-CT normalization of m *before* node_conv: a hyperedge pools multiple
-        # cell types; without per-CT centering the abundant type dominates the
-        # hyperedge embedding, drowning cross-type signal. Affects only what the
-        # conv sees; the skip branch uses raw m unless reuse_input_norm.
-        self.in_ct = CTNorm(D, n_cell_types) if "ct" in input_norm else None
-        self.in_ln = nn.LayerNorm(D) if "layer" in input_norm else None
-        self.in_bn = nn.BatchNorm1d(D) if "batch" in input_norm else None
+        self.W_ct = LinearDict(n_cell_types, input_dim, D, bias=True)  # PerCTTransform
+        # PerCTNorm before the aggregation: a hyperedge pools several cell types; without per-CT
+        # centring the abundant type dominates the hyperedge embedding.
+        self.in_ct = CTNorm(D, n_cell_types)
         self.node_conv = nn.Linear(D, D, bias=False)                   # node->edge
         self.edge_bias = nn.Parameter(torch.zeros((D,)))
         self.hyperedge_conv = nn.Linear(D, D, bias=False)              # edge->node
         self.node_bias = nn.Parameter(torch.zeros((D,)))
         self.act = nn.PReLU()
-
-        # Per-branch normalization. Without it the skip branch m (own-expression)
-        # enters with ~2x the norm of the neighborhood branch u and dominates z,
-        # washing out u's stronger neighborhood signal. "layer" = LayerNorm
-        # (per-cell), "ct" = per-cell-type.
-        if fuse_norm == "layer":
-            self.norm_u, self.norm_m = nn.LayerNorm(D), nn.LayerNorm(D)
-        elif fuse_norm == "ct":
-            self.norm_u, self.norm_m = CTNorm(D, n_cell_types), CTNorm(D, n_cell_types)
-        else:
-            self.norm_u, self.norm_m = nn.Identity(), nn.Identity()
-
-        # "concat" -> learned fuse MLP over [u, m]; "add" -> plain residual u + m
-        # (forces both branches to contribute equally; no MLP to learn to ignore u).
-        self.fuse = nn.Sequential(
-            nn.Linear(2 * D, D),
-            nn.PReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(D, D),
-        ) if skip_mode == "concat" else None
-        # "cross" -> treat [u, m] as a 2-token sequence and self-attend (each attends
-        # to the other), standard transformer block (residual + attn), combined by
-        # mean. Tests whether learnable attention routing collapses onto m like concat.
-        self.mha = (
-            nn.MultiheadAttention(D, num_heads, dropout=dropout, batch_first=True)
-            if skip_mode == "cross" else None
-        )
+        # LN_P and LN_0: without them the skip branch enters with ~2x the norm of the
+        # neighbourhood branch and dominates Z.
+        self.norm_u, self.norm_m = nn.LayerNorm(D), nn.LayerNorm(D)
         self.reset_parameters()
-
-    def _input_norm(self, m, cell_types):
-        # applies input_norm to m: "ct", "layer", or "ct_layer" (CTNorm then LayerNorm)
-        if self.in_ct is not None:
-            m = self.in_ct(m, cell_types)
-        if self.in_bn is not None:
-            m = self.in_bn(m)
-        if self.in_ln is not None:
-            m = self.in_ln(m)
-        return m
-
-    def _norm(self, branch, x, cell_types):
-        mod = self.norm_u if branch == "u" else self.norm_m
-        return mod(x, cell_types) if self.fuse_norm == "ct" else mod(x)
 
     def reset_parameters(self):
         self.W_ct.reset_parameters()
@@ -203,31 +146,12 @@ class CTHGEncoder(nn.Module):
         H = incidence_matrix
         dvi, dei = _norms(H)
 
-        m = self.W_ct(node_feats, cell_types)                       # cell in common space
-        # normalize before aggregation (isolates the conv input; skip uses raw m
-        # unless reuse_input_norm composes fuse_norm on top of m_in)
-        m_in = self._input_norm(m, cell_types) if self.input_norm != "none" else m
-        # node convolution (node->edge) -> hyperedge embeddings
+        m = self.W_ct(node_feats, cell_types)                       # P0
+        m_in = self.in_ct(m, cell_types)                            # P0~
         h = dei.unsqueeze(1) * (H.t() @ (dvi.unsqueeze(1) * self.node_conv(m_in))) + self.edge_bias
-        # hyperedge convolution (edge->node) -> node embeddings
         u = dvi.unsqueeze(1) * (H @ self.hyperedge_conv(self.act(h))) + self.node_bias
-        # skip branch: reuse the input-normalized m_in (normalize m once), or
-        # normalize raw m separately at fusion. u always gets its fuse_norm.
-        un = self._norm("u", u, cell_types)
-        if self.reuse_input_norm and self.input_norm != "none":
-            # compose: skip = fuse_norm(input_norm(m)) -- e.g. LayerNorm(CTNorm(m))
-            mn = self._norm("m", m_in, cell_types)
-        else:
-            # parallel: skip = fuse_norm(raw m); input_norm only shapes the conv path
-            mn = self._norm("m", m, cell_types)
-        if self.skip_mode == "add":
-            z = un + mn
-        elif self.skip_mode == "concat":
-            z = self.fuse(torch.cat([un, mn], dim=1))
-        else:  # cross: 2-token self-attention over [u, m], residual, mean-combine
-            seq = torch.stack([un, mn], dim=1)          # (N, 2, D)
-            seq = seq + self.mha(seq, seq, seq, need_weights=False)[0]
-            z = seq.mean(dim=1)                         # (N, D)
+        un = self.norm_u(u)                                         # LN_P(P)
+        z = un + self.norm_m(m)                                     # + LN_0(P0)
         return z, h, un
 
 
@@ -252,6 +176,8 @@ class CTHGDecoder(nn.Module):
         self.output_proj = LinearDict(n_cell_types, D, output_dim, bias=True)  # m -> ct-specific node expr
         self.he_conv = nn.Linear(D, D, bias=False)                     # node->edge
         self.he_bias = nn.Parameter(torch.zeros((D,)))
+        # built only for training (the driver sets hyperedge_feat_dim from the hypergraph);
+        # inference needs only z, so the hyperedge head is skipped there
         self.he_out = (
             HyperedgeDecoder(D, hyperedge_feat_dim, dropout=dropout) if hyperedge_feat_dim else None
         )
@@ -281,15 +207,9 @@ class CTHGDecoder(nn.Module):
 class CTHGCAEv6(nn.Module):
 
     def __init__(self, num_cell_types, input_dim, embedding_dim, dropout=0.1,
-                 hyperedge_feat_dim=None, hyperedge_pool="spot", skip_source="common",
-                 skip_mode="add", fuse_norm="layer", input_norm="ct",
-                 reuse_input_norm=False, num_heads=2):
+                 hyperedge_feat_dim=None):
         super().__init__()
-        self.encoder = CTHGEncoder(num_cell_types, input_dim, embedding_dim,
-                                   dropout=dropout, skip_source=skip_source,
-                                   skip_mode=skip_mode, fuse_norm=fuse_norm,
-                                   input_norm=input_norm, reuse_input_norm=reuse_input_norm,
-                                   num_heads=num_heads)
+        self.encoder = CTHGEncoder(num_cell_types, input_dim, embedding_dim)
         self.decoder = CTHGDecoder(num_cell_types, embedding_dim, input_dim,
                                    hyperedge_feat_dim, dropout=dropout)
 
