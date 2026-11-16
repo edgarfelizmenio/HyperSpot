@@ -99,6 +99,129 @@ def plot_domain_svgs(adata, top_genes, regions = list[str],
     plt.show()
 
             
+def top_gene_regions(domain_svgs, rank_by: str = 'scores', per: str = 'top'):
+    """Gene-centric inversion of the per-domain ct-SVG lists.
+
+    Returns {gene_name: {'regions': [sorted region labels], 'score': max rank_by}}.
+    per='top' : a gene's regions = domains where it is the rank-1 (highest rank_by) ct-SVG.
+    per='all' : a gene's regions = every domain where it is a ct-SVG (broader spanning).
+    Unlike create_svg_list (winner-take-all → one region per gene), a gene here keeps ALL
+    the regions it tops, so genes spanning >1 region are preserved (STAMarker-style).
+    """
+    out = {}
+    for region, df in domain_svgs.items():
+        if df is None or len(df) == 0:
+            continue
+        if per == 'top':
+            rows = [df.sort_values(rank_by, ascending=False).iloc[0]]
+        else:
+            rows = [df.iloc[i] for i in range(len(df))]
+        for row in rows:
+            g = str(row['names']); s = float(row[rank_by])
+            e = out.setdefault(g, {'regions': [], 'score': s})
+            e['regions'].append(str(region)); e['score'] = max(e['score'], s)
+    for g in out:
+        out[g]['regions'] = sorted(set(out[g]['regions']), key=lambda r: (len(r), r))
+    return out
+
+
+def plot_svgs_by_gene(adata, domain_svgs, rank_by: str = 'scores', per: str = 'top',
+                      limit: int = 12, per_row: int = None, figsize=(4.4, 4.0), use_raw=False, shape="auto",
+                      img: bool = False, img_res_key: str = 'lowres', img_alpha: float = 1.0, domain_palette=None,
+                      save=True, transparent=True, file_ext='png', save_path=None,
+                      rasterize=True, raster_dpi=150):
+    """Per top gene: [domains where it is a top gene] | [its expression].
+
+    Gene-centric counterpart to plot_domain_svgs — a gene that is a top gene in >1 region
+    highlights all of them (no region is emptied by a winner-take-all merge). Genes are
+    ordered by number-of-regions spanned (desc), then score.
+
+    ``img`` toggles the tissue-image background (default off). ``limit`` caps the total number of genes shown (None = all). ``per_row`` is how many genes
+    to place per row (columns); genes wrap into stacked blocks of two physical rows each
+    (domain row + expression row). ``per_row=None`` keeps every gene on a single row.
+    """
+    project_metadata = ProjectMetadata()
+    gr = top_gene_regions(domain_svgs, rank_by=rank_by, per=per)
+    if not gr:
+        print("plot_svgs_by_gene: no ct-SVGs to plot — skipping.")
+        return
+    genes = sorted(gr, key=lambda g: (len(gr[g]['regions']), gr[g]['score']), reverse=True)[:limit]
+    syms = var_symbols(adata)
+    _shape = spatial_shape(adata) if shape == "auto" else shape
+    # stable per-domain colour (tab20) so each domain keeps the same colour across panels
+    import matplotlib as _mpl
+    _all_doms = sorted(adata.obs['domain'].astype(str).unique(),
+                       key=lambda d: int(d) if str(d).isdigit() else d)
+    if domain_palette is not None:
+        _pal = list(domain_palette)
+        _dom_color = {d: _pal[i % len(_pal)] for i, d in enumerate(_all_doms)}
+    else:
+        _cmap = plt.get_cmap('tab20')
+        _dom_color = {d: _mpl.colors.to_hex(_cmap(i % 20)) for i, d in enumerate(_all_doms)}
+
+    # paired rows (domain row + expression row) per gene; genes wrap at `per_row` columns into stacked blocks
+    n = len(genes)
+    width, height = figsize
+    ncols = n if (per_row is None or per_row <= 0) else min(per_row, n)
+    n_blocks = int(np.ceil(n / ncols))
+    nrows = 2 * n_blocks
+    fig, axes = plt.subplots(nrows=nrows, ncols=ncols, figsize=(width * ncols, height * nrows))
+    axes = np.asarray(axes).reshape(nrows, ncols)
+    for i, gene_id in enumerate(genes):
+        regset = set(gr[gene_id]['regions']); score = gr[gene_id]['score']
+        gene_name = syms.loc[gene_id] if gene_id in syms.index else gene_id
+        blk, col = divmod(i, ncols)
+        ax_region, ax_expr = axes[blk * 2][col], axes[blk * 2 + 1][col]
+
+        # (row 0) ONLY the cells assigned to this gene's domain(s), each domain its own colour
+        _rs = sorted(regset, key=lambda d: int(d) if str(d).isdigit() else d)
+        a_reg = adata[adata.obs['domain'].astype(str).isin(regset)].copy()
+        a_reg.obs['domain'] = pd.Categorical(a_reg.obs['domain'].astype(str), categories=_rs)
+        a_reg.uns['domain_colors'] = [_dom_color[d] for d in _rs]   # scanpy/squidpy colour source
+        sq.pl.spatial_scatter(
+            a_reg, 
+            shape=_shape, 
+            color='domain', 
+            ax=ax_region, 
+            img=img, 
+            img_res_key=img_res_key, 
+            img_alpha=img_alpha,
+            palette=_mpl.colors.ListedColormap([_dom_color[d] for d in _rs]),
+            legend_loc=None,
+            title=f"{gene_name}: region{'' if len(_rs)==1 else 's'} {', '.join(_rs)}")
+        _lg = ax_region.get_legend()
+        if _lg is not None:
+            _lg.remove()
+
+        # (right) expression
+        vals = adata[:, gene_id].X
+        vals = np.asarray(vals.todense()).ravel() if hasattr(vals, 'todense') else np.asarray(vals).ravel()
+        nz = vals[vals > 0]
+        vmin = float(np.percentile(nz, 5)) if nz.size else None
+        vmax = float(np.percentile(nz, 95)) if nz.size else None
+        sq.pl.spatial_scatter(adata.copy(), shape=_shape, color=gene_id, ax=ax_expr, img=img, img_res_key=img_res_key, img_alpha=img_alpha,
+                              title=f"{gene_name}: {score:0.4}", use_raw=use_raw,
+                              vmin=vmin, vmax=vmax, colorbar=False)
+        if rasterize:   # rasterize the dense point + tissue-image layers; text/axes stay vector -> small PDF
+            for _ax in (ax_region, ax_expr):
+                for _art in list(_ax.collections) + list(_ax.images):
+                    _art.set_rasterized(True)
+        ax_region.axis('off'); ax_expr.axis('off')
+
+    # blank any trailing cells in the last block (when n is not a multiple of ncols)
+    for j in range(n, n_blocks * ncols):
+        blk, col = divmod(j, ncols)
+        axes[blk * 2][col].axis('off'); axes[blk * 2 + 1][col].axis('off')
+
+    plt.gcf().set_layout_engine("tight")
+    if save:
+        plt.savefig(project_metadata.plot_dir / f'svgs_by_gene.{file_ext}', transparent=transparent)
+    if save_path is not None:
+        for _p in ([save_path] if isinstance(save_path, (str, Path)) else save_path):
+            plt.savefig(_p, bbox_inches='tight', dpi=raster_dpi)
+    plt.show()
+
+
 def plot_domain_de_genes(adata,
                          region,
                          de_scores,
