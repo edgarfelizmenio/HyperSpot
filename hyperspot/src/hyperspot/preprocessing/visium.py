@@ -14,11 +14,8 @@ from ..utils import load_ct_spatial_data, save_ct_spatial_data, load_decomposed_
 def build_hyperedge_feats(adata_st, spot_name_to_index, n_hyperedge_feats=256):
     """Per-spot pseudobulk target for the hyperedge reconstruction head.
 
-    Hyperedge s is 1:1 with spot s. Each cell joins the hyperedges of its own
-    spot and of that spot's k-1 nearest spots (knn_graph with loop=True), so
-    hyperedge s holds the cells of every spot that lists s among its k nearest:
-    spot s and its k-1 neighbours in the interior, more or fewer spots along
-    tissue edges. The decoder pools the
+    Hyperedge s is 1:1 with spot s. Its members are the cells of spot s and of
+    its k-1 nearest spots (knn_graph with loop=True). The decoder pools the
     embeddings of all members and predicts spot s's own pseudobulk from them.
     Spot s's cells are among the pooled members, so the target is partly
     reconstructed from those cells' own embeddings; it is not a prediction of
@@ -71,15 +68,13 @@ def create_hypergraph_data(adata_st, n_features=3000, num_neighbor_spots=7,
     # 2nd row. The 2nd row is sorted in ascending order.
     coords = torch.from_numpy(adata_st.obsm['spatial'])
     edge_index = knn_graph(coords, k=num_neighbor_spots, loop=True)
-    adj_list = edge_index[0].reshape(-1, num_neighbor_spots)
-    
+
     ct_list = project_metadata.ct_list
 
     cell_ids = []
     cell_feats = []
     cell_to_spot_id = []
     cell_types = []
-    hyperedge_indexes = []
     cell_offset = 0
     for ct in ct_list:
         adata_ct = load_ct_spatial_data(ct)
@@ -118,27 +113,24 @@ def create_hypergraph_data(adata_st, n_features=3000, num_neighbor_spots=7,
         ct_cell_types = adata_ct.obs[project_metadata.ct_key].map(cell_type_mapping).to_numpy()
         ct_cell_types = torch.from_numpy(ct_cell_types)
         cell_types.append(ct_cell_types)
-        
-        ct_cell_hyperedge_list = adj_list[ct_cell_to_spot_id]
-        # create hyperedge index
-        # hyperedge_members are cells belonging to incident hyperedges
-        ct_hyperedge_members = ct_cell_ids.repeat_interleave(num_neighbor_spots)
-        # incident_hyperedges are the hyperedges incident to each hyperedge_member
-        ct_incident_hyperedges = ct_cell_hyperedge_list.flatten()
-        ct_hyperedge_index = torch.stack((ct_hyperedge_members, ct_incident_hyperedges))
-        hyperedge_indexes.append(ct_hyperedge_index)
 
     cell_ids = torch.cat(cell_ids, dim = 0)
     cell_feats = torch.cat(cell_feats, dim=0)
     cell_to_spot_id = torch.cat(cell_to_spot_id, axis=0)
     cell_types = torch.cat(cell_types, dim=0)
-    hyperedge_index = torch.cat(hyperedge_indexes, dim=1)
 
     # cell_ids are already sequential (0..N-1) so sort is a no-op, kept for consistency
     cell_ids, sort_order = torch.sort(cell_ids)
     cell_feats = cell_feats[sort_order]
     cell_to_spot_id = cell_to_spot_id[sort_order]
     cell_types = cell_types[sort_order]
+
+    # hyperedge s = cells of spot s and of its num_neighbor_spots-1 nearest spots:
+    # spot q is in hyperedge s when q is one of s's nearest spots (edge_index[0] = q, edge_index[1] = s),
+    # and every cell belongs to the hyperedges its spot is in
+    spot_in_hyperedge = torch.zeros((adata_st.n_obs, adata_st.n_obs), dtype=torch.bool)
+    spot_in_hyperedge[edge_index[0], edge_index[1]] = True
+    hyperedge_index = spot_in_hyperedge[cell_to_spot_id].nonzero().t()
 
     # derive incidence matrix from hyperedge index
     # intra-spot entries (cell's spot == hyperedge) get intra_weight; inter-spot get inter_weight
