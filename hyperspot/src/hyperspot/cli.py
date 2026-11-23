@@ -91,6 +91,12 @@ class CTClusterArgs:                # cell-type domains
     min_cluster_pct: float = -1     # min fraction of the cell type's CELLS per domain; OFF by default (dedup fixes the over-clustering it patched)
     dedup_spots: bool = True        # collapse same-spot same-CT duplicate cells before clustering (Spotiphy); guarded -> auto no-op on real per-cell variation. Set False for true-counts / per-cell data.
 
+_SAMPLE_HYPEREDGES_HELP = ("Fraction of neighborhood hyperedges kept per hop at inference (fan-out cap, avoids OOM). "
+           "1.0 = full neighborhood (no sampling, deterministic).")
+_SAMPLE_CELLS_HELP = ("Fraction of neighborhood cells kept per hyperedge expansion at inference (fan-out cap, avoids OOM). "
+           "1.0 = full neighborhood.")
+_COPY_VAR_COLS_HELP = "var columns to copy from the decomposed AnnData into the aggregated AnnData."
+
 _GENE_SCORES_HELP = ("Also write a per-gene table (*_scores.csv) for benchmarking: every gene with its "
                      "best domain, adj_pval, raw p (CombinedPvals) and passes_filter. Genes failing "
                      "min-pts/min-logfc get adj_pval 1 and no p-value.")
@@ -117,7 +123,7 @@ class CTSVGArgs:
 #   10 init-project-files-dir   20 train-embedder   30 make-embedding
 #   40 compute-spatial-domains  50 compute-celltype-spatial-domains
 #   60 compute-svgs             70 compute-ct-svgs
-#   80 (reserved: run-all)      90 perform-model-evaluation
+#   80 run-pipeline             90 perform-model-evaluation
 # 1000 folder-test (always last)
 @app.command(help="Create a project files directory.",
              sort_key=10)
@@ -159,8 +165,8 @@ def train_embedder(
              sort_key=30)
 def make_embedding(
     project: ProjectArgs,
-    K: Annotated[float, Parameter(help="Fraction of neighborhood hyperedges kept per hop at inference (fan-out cap, avoids OOM). 1.0 = full neighborhood (deterministic, reproduces training-time embeddings).")] = 0.7,
-    M: Annotated[float, Parameter(help="Fraction of neighborhood cells kept per hyperedge expansion at inference (fan-out cap, avoids OOM). 1.0 = full neighborhood.")] = 0.7,
+    sample_hyperedges: Annotated[float, Parameter(help=_SAMPLE_HYPEREDGES_HELP)] = 0.7,
+    sample_cells: Annotated[float, Parameter(help=_SAMPLE_CELLS_HELP)] = 0.7,
     common: CommonArgs = CommonArgs(),
     model: EmbedderCLIArgs = EmbedderCLIArgs(),
     runtime: RuntimeArgs = RuntimeArgs(),
@@ -180,7 +186,7 @@ def make_embedding(
                                 args,
                                 runtime.batch_size,
                                 runtime.accelerator,
-                                K=K, M=M)
+                                K=sample_hyperedges, M=sample_cells)
 
 @app.command(help="Using hyperedge embeddings, find the spatial domains present in the Spatial Transcriptomics tissue.",
              sort_key=40)
@@ -189,7 +195,7 @@ def compute_spatial_domains(
     clustering: ClusterArgs = ClusterArgs(),
     copy_var_cols: Annotated[
         Optional[List[str]], 
-        Parameter(consume_multiple=True, help="var columns to copy from the decomposed AnnData into the aggregated AnnData.")] = None,
+        Parameter(consume_multiple=True, help=_COPY_VAR_COLS_HELP)] = None,
     common: CommonArgs = CommonArgs(),
 ):
 
@@ -258,6 +264,40 @@ def compute_ct_svgs(project: ProjectArgs, ctsvg: CTSVGArgs = CTSVGArgs()):
             gene_table.to_csv(out / f"svgs_ct_{ct}_scores.csv")
             logger.info(f"gene scores [{ct}] -> {out / f'svgs_ct_{ct}_scores.csv'}")
 
+@app.command(help="Run the HyperSpot pipeline on a project whose hypergraph is built: train-embedder, "
+                  "make-embedding, compute-spatial-domains, compute-celltype-spatial-domains, compute-svgs, "
+                  "compute-ct-svgs. Takes the options of those six commands and gives the same results as "
+                  "running them one by one.",
+             sort_key=80)
+def run_pipeline(
+    project: ProjectArgs,
+    num_epochs: Annotated[int, Parameter(help="Training epochs.")] = 1000,
+    sample_hyperedges: Annotated[float, Parameter(help=_SAMPLE_HYPEREDGES_HELP)] = 0.7,
+    sample_cells: Annotated[float, Parameter(help=_SAMPLE_CELLS_HELP)] = 0.7,
+    copy_var_cols: Annotated[
+        Optional[List[str]],
+        Parameter(consume_multiple=True, help=_COPY_VAR_COLS_HELP)] = None,
+    common: CommonArgs = CommonArgs(),
+    model: EmbedderCLIArgs = EmbedderCLIArgs(),
+    runtime: RuntimeArgs = RuntimeArgs(),
+    clustering: ClusterArgs = ClusterArgs(),
+    ct_clustering: CTClusterArgs = CTClusterArgs(),
+    svg: SVGArgs = SVGArgs(),
+    ctsvg: CTSVGArgs = CTSVGArgs(),
+):
+    logger.info("run-pipeline 1/6: train-embedder")
+    train_embedder(project, common=common, num_epochs=num_epochs, model=model, runtime=runtime)
+    logger.info("run-pipeline 2/6: make-embedding")
+    make_embedding(project, sample_hyperedges=sample_hyperedges, sample_cells=sample_cells, common=common, model=model, runtime=runtime)
+    logger.info("run-pipeline 3/6: compute-spatial-domains")
+    compute_spatial_domains(project, clustering=clustering, copy_var_cols=copy_var_cols, common=common)
+    logger.info("run-pipeline 4/6: compute-celltype-spatial-domains")
+    compute_celltype_spatial_domains(project, ct_clustering=ct_clustering, common=common)
+    logger.info("run-pipeline 5/6: compute-svgs")
+    compute_svgs(project, svg=svg)
+    logger.info("run-pipeline 6/6: compute-ct-svgs")
+    compute_ct_svgs(project, ctsvg=ctsvg)
+
 @app.command(help="Run evaluation test.", sort_key=90)
 def perform_model_evaluation(
     project: ProjectArgs,         
@@ -301,3 +341,4 @@ def folder_test(project: ProjectArgs):
 
 if __name__ == "__main__":
     app()
+
