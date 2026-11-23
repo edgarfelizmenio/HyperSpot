@@ -11,7 +11,7 @@ from ..metadata import ProjectMetadata
 from ..utils import load_ct_spatial_data, save_ct_spatial_data, load_decomposed_st_data
 
 
-def build_hyperedge_feats(adata_st, spot_name_to_index, n_hyperedge_feats=256):
+def build_hyperedge_feats(adata_st, spot_name_to_index, n_hyperedge_feats=3000):
     """Per-spot pseudobulk target for the hyperedge reconstruction head.
 
     Hyperedge s is 1:1 with spot s. Its members are the cells of spot s and of
@@ -53,8 +53,7 @@ def build_hyperedge_feats(adata_st, spot_name_to_index, n_hyperedge_feats=256):
 
 
 def create_hypergraph_data(adata_st, n_features=3000, num_neighbor_spots=7,
-                           intra_weight=1.0, inter_weight=1.0, scale=False,
-                           n_hyperedge_feats=256):
+                           n_hyperedge_feats=3000):
     project_metadata = ProjectMetadata()
     cell_type_mapping = project_metadata.ct_mapping
 
@@ -92,8 +91,6 @@ def create_hypergraph_data(adata_st, n_features=3000, num_neighbor_spots=7,
 
         ct_feature_genes = feature_genes[ct]
         adata_ct_feats = adata_ct[:, ct_feature_genes].copy()
-        if scale:
-            sc.pp.scale(adata_ct_feats, max_value=None)
         X = adata_ct_feats.X
         ct_cell_feats = torch.tensor(X.toarray() if sp.issparse(X) else X, dtype=torch.float)
         # pad cell feats if it is less than n_features
@@ -132,27 +129,17 @@ def create_hypergraph_data(adata_st, n_features=3000, num_neighbor_spots=7,
     spot_in_hyperedge[edge_index[0], edge_index[1]] = True
     hyperedge_index = spot_in_hyperedge[cell_to_spot_id].nonzero().t()
 
-    # derive incidence matrix from hyperedge index
-    # intra-spot entries (cell's spot == hyperedge) get intra_weight; inter-spot get inter_weight
+    # derive the binary incidence matrix from hyperedge index
     incidence_matrix = torch.zeros((cell_ids.shape[0], adata_st.n_obs), dtype=torch.float)
-    is_intra = (cell_to_spot_id[hyperedge_index[0]] == hyperedge_index[1])
-    weights = torch.where(is_intra,
-                          torch.tensor(intra_weight, dtype=torch.float),
-                          torch.tensor(inter_weight, dtype=torch.float))
-    incidence_matrix[hyperedge_index[0], hyperedge_index[1]] = weights
+    incidence_matrix[hyperedge_index[0], hyperedge_index[1]] = 1.0
 
     # hyperedge feats: spot-basis pseudobulk target for hyperedge-embedding
-    # reconstruction (small global HVG; cell-less spots -> all-zero rows, masked
+    # reconstruction (global HVG; cell-less spots -> all-zero rows, masked
     # out in the loss). Indexed by hyperedge id == spot index (length num_spots).
-    # n_hyperedge_feats=0 keeps the legacy degree vector (hyperedge optimization
-    # then cannot be enabled at train time).
-    if n_hyperedge_feats:
-        hyperedge_feats, hyperedge_feat_genes = build_hyperedge_feats(
-            adata_st, spot_name_to_index, n_hyperedge_feats=n_hyperedge_feats)
-        with open(project_metadata.project_folder / "hyperedge_feat_genes.pkl", "wb") as f:
-            pickle.dump(hyperedge_feat_genes, f)
-    else:
-        hyperedge_feats = incidence_matrix.sum(dim=0)   # legacy: hyperedge degree
+    hyperedge_feats, hyperedge_feat_genes = build_hyperedge_feats(
+        adata_st, spot_name_to_index, n_hyperedge_feats=n_hyperedge_feats)
+    with open(project_metadata.project_folder / "hyperedge_feat_genes.pkl", "wb") as f:
+        pickle.dump(hyperedge_feat_genes, f)
     
     n_cell_types = project_metadata.n_cell_types
     n_spots = adata_st.n_obs

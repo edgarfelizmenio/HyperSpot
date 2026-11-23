@@ -1,6 +1,5 @@
 import pickle
 import scanpy as sc
-import squidpy as sq
 import numpy as np
 
 from ..metadata import ProjectMetadata
@@ -65,7 +64,7 @@ def perform_ct_feature_selection(n_features = 3000, overwrite=False):
     with open(ct_feature_filename, "wb") as ctff:
         pickle.dump(ct_feats, ctff)
 
-def compute_feature_genes(adata_ct, n_features=3000, use_spatial=False):
+def compute_feature_genes(adata_ct, n_features=3000):
     # sc.pp.filter_genes(adata_ct, min_cells=1)
     genes = adata_ct.var_names
 
@@ -74,44 +73,9 @@ def compute_feature_genes(adata_ct, n_features=3000, use_spatial=False):
     # valid_hvg = (adata_ct.var["highly_variable"] == True)
     # hvg_genes = adata_ct.var.index[valid_hvg]
 
-    if not use_spatial:
-        # hvg_pct = adata_ct.var.loc[hvg_genes, 'dispersions_norm'].sort_values(ascending=False)
-        hvg_pct = adata_ct.var['dispersions_norm'].sort_values(ascending=False)
-        top_genes = hvg_pct.index[:n_features]
-        adata_ct.var['feature_gene'] = False
-        adata_ct.var.loc[top_genes, 'feature_gene'] = True
-        return top_genes
-    
-    sq.gr.spatial_neighbors(adata_ct)
-    sq.gr.spatial_autocorr(adata_ct, mode='moran', genes = adata_ct.var_names)
-    var = adata_ct.var
-    corr_df = adata_ct.uns['moranI'].loc[adata_ct.var_names]
-    hvg_pct = var.loc[hvg_genes, 'dispersions_norm'].rank(pct=True)
-    
-    variance = adata_ct.X.var(axis=0)
-    moran_abs = corr_df['I'].abs()
-    
-    moran_z = (moran_abs - moran_abs.mean()) / moran_abs.std()
-    var_z = (variance - variance.mean()) / variance.std()
-    spatial_score = moran_z * var_z
-    spatial_pct = spatial_score.rank(pct=True)
-    combined_score = np.sqrt(hvg_pct * spatial_pct.loc[hvg_genes])
-    adata_ct.var['hvg_scores'] = np.nan
-    adata_ct.var.loc[hvg_genes, 'hvg_scores'] = hvg_pct
-    adata_ct.var['spatial_scores'] = spatial_pct
-    
-    adata_ct.var['combined_scores'] = np.nan
-    adata_ct.var.loc[hvg_genes, 'combined_scores'] = combined_score
-    top_genes = combined_score.sort_values(ascending=False).index[:n_features]
-    n_spatial_genes = n_features - len(top_genes)
-
-    if n_spatial_genes > 0:
-        # get the genes that are not yet selected
-        remaining_genes = var.index.difference(top_genes)
-        remaining_spatial_pct = spatial_pct.loc[remaining_genes]
-
-        top_genes = top_genes.append(remaining_spatial_pct.sort_values(ascending=False).index[:n_spatial_genes])
-
+    # hvg_pct = adata_ct.var.loc[hvg_genes, 'dispersions_norm'].sort_values(ascending=False)
+    hvg_pct = adata_ct.var['dispersions_norm'].sort_values(ascending=False)
+    top_genes = hvg_pct.index[:n_features]
     adata_ct.var['feature_gene'] = False
     adata_ct.var.loc[top_genes, 'feature_gene'] = True
     return top_genes
