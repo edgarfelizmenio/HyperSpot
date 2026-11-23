@@ -129,6 +129,16 @@ def guarded_spot_reps(X, spot_labels, dedup=True, tol=1e-3, sample=None):
     return rep_idx, inv
 # -------------------------------------------------------------------------------
 
+# DE-table columns where a smaller value ranks first (p-values; detection rate outside
+# the domain). Every other rank_by column (scores, logfoldchanges, pts) ranks largest first.
+RANK_ASCENDING = ('pval', 'pvals_adj', 'pts_rest')
+
+
+def rank_ascending(rank_by):
+    """True when smaller values of the DE column `rank_by` rank first."""
+    return rank_by in RANK_ASCENDING
+
+
 def save_orig_st_data(adata_st):
     adata_st.write_h5ad(ProjectMetadata().project_folder / 'ST_orig.h5ad')
 

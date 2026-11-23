@@ -46,9 +46,9 @@ def load():
     ProjectMetadata.use(PROJ)
     aggr = load_aggr_st_data()
     # unfiltered per-gene tissue DE table (best domain per gene): scores/pts/logfc/pvals_adj
-    flat = _compute_spatial_de_table(aggr, key="domain", method="wilcoxon", min_pts=0, min_logfc=-1e9,
-                                     require_specificity=False, pval_adjust="scanpy",
-                                     filter_mode="none", best_domain_per_gene=True).set_index("gene")
+    flat = _compute_spatial_de_table(aggr, key="domain", min_pts=0, min_logfc=-1e9,
+                                     filter_mode="none")
+    flat = flat.loc[flat.groupby("gene")["scores"].idxmax()].set_index("gene")   # best domain per gene
     # tissue-level Moran's I + mean expression on the same matrix
     sq.gr.spatial_neighbors(aggr, coord_type="generic", n_neighs=6)
     sq.gr.spatial_autocorr(aggr, mode="moran", genes=list(aggr.var_names), n_perms=None, seed=0)

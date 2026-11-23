@@ -8,7 +8,7 @@ import squidpy as sq
 from pathlib import Path
 
 from ..metadata import ProjectMetadata
-from ..utils import var_symbols, spatial_shape
+from ..utils import var_symbols, spatial_shape, rank_ascending
 
 def plot_region(adata, region_id, ax, region_key="domain"):
     sq.pl.spatial_scatter(
@@ -102,24 +102,27 @@ def plot_domain_svgs(adata, top_genes, regions = list[str],
 def top_gene_regions(domain_svgs, rank_by: str = 'scores', per: str = 'top'):
     """Gene-centric inversion of the per-domain ct-SVG lists.
 
-    Returns {gene_name: {'regions': [sorted region labels], 'score': max rank_by}}.
-    per='top' : a gene's regions = domains where it is the rank-1 (highest rank_by) ct-SVG.
+    Returns {gene_name: {'regions': [sorted region labels], 'score': best rank_by}}; best =
+    largest, or smallest for p-values / pts_rest (utils.rank_ascending).
+    per='top' : a gene's regions = domains where it is the rank-1 (best rank_by) ct-SVG.
     per='all' : a gene's regions = every domain where it is a ct-SVG (broader spanning).
     Unlike create_svg_list (winner-take-all → one region per gene), a gene here keeps ALL
     the regions it tops, so genes spanning >1 region are preserved (STAMarker-style).
     """
+    ascending = rank_ascending(rank_by)
+    best = min if ascending else max
     out = {}
     for region, df in domain_svgs.items():
         if df is None or len(df) == 0:
             continue
         if per == 'top':
-            rows = [df.sort_values(rank_by, ascending=False).iloc[0]]
+            rows = [df.sort_values(rank_by, ascending=ascending).iloc[0]]
         else:
             rows = [df.iloc[i] for i in range(len(df))]
         for row in rows:
             g = str(row['names']); s = float(row[rank_by])
             e = out.setdefault(g, {'regions': [], 'score': s})
-            e['regions'].append(str(region)); e['score'] = max(e['score'], s)
+            e['regions'].append(str(region)); e['score'] = best(e['score'], s)
     for g in out:
         out[g]['regions'] = sorted(set(out[g]['regions']), key=lambda r: (len(r), r))
     return out
@@ -145,7 +148,9 @@ def plot_svgs_by_gene(adata, domain_svgs, rank_by: str = 'scores', per: str = 't
     if not gr:
         print("plot_svgs_by_gene: no ct-SVGs to plot — skipping.")
         return
-    genes = sorted(gr, key=lambda g: (len(gr[g]['regions']), gr[g]['score']), reverse=True)[:limit]
+    # more regions first, then best score first
+    sign = 1 if rank_ascending(rank_by) else -1
+    genes = sorted(gr, key=lambda g: (-len(gr[g]['regions']), sign * gr[g]['score']))[:limit]
     syms = var_symbols(adata)
     _shape = spatial_shape(adata) if shape == "auto" else shape
     # stable per-domain colour (tab20) so each domain keeps the same colour across panels

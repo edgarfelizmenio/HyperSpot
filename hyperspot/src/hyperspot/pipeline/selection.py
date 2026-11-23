@@ -5,11 +5,11 @@ import scanpy as sc
 
 import scipy.sparse as sp
 
-from ..metadata import ProjectMetadata
 from ..utils import (
     load_ct_spatial_data,
     load_aggr_st_data,
     guarded_spot_reps,
+    rank_ascending,
 )
 
 
@@ -45,94 +45,33 @@ def dedup_by_spot(adata, tol=1e-3, sample=100):
     return adata[rep_idx].copy()
 
 
-
-def compute_domain_svgs(
-    key: str = 'domain',
-    min_pts: float = 0.8,
-    min_logfc: float = 1.5,
-    rank_by: str = 'scores',
-    dedup_spots: bool = True,
-):
-    project_metadata = ProjectMetadata()
-
-    # ST-level (per-spot aggregated) data -> unique spots -> dedup is a no-op
-    adata_aggr = load_aggr_st_data()
-
-    return compute_spatial_de_genes(
-        adata_aggr,
-        key,
-        min_pts,
-        min_logfc,
-        rank_by,
-        dedup_spots=dedup_spots,
-    )
-    
-def compute_domain_ct_svgs(
-    cell_type: str,
-    key: str = 'domain',
-    min_pts: float = 0.8,
-    min_logfc: float = 1.5,
-    rank_by: str = 'scores',
-    dedup_spots: bool = True,
-):
-    project_metadata = ProjectMetadata()
-
-    # load adata for cell type
-    adata_ct = load_ct_spatial_data(cell_type)
-
-    return compute_spatial_de_genes(
-        adata_ct,
-        key,
-        min_pts,
-        min_logfc,
-        rank_by,
-        dedup_spots=dedup_spots,
-    )
-
 def _compute_spatial_de_table(
     adata,
     key: str = 'domain',
-    method: str = 'wilcoxon',
     min_pts: float = 0.8,
     min_logfc: float = 1.5,
-    require_specificity: bool = False,
-    pval_adjust: str = 'scanpy',
     pval_thresh: float = None,
     filter_mode: str = 'drop',
     dedup_spots: bool = True,
 ):
     """Single engine for spatial-DE / (ct)SVG statistics -> flat per-(gene, domain) DataFrame.
 
-    Detection and the per-gene table (compute_spatial_de_genes, compute_svg_results)
-    both call it unfiltered through _de_table_all; analysis notebooks and scripts call
-    it directly with the flags below.
+    Detection and the per-gene table (compute_svg_results) both call it unfiltered
+    through _de_table_all; analysis notebooks and scripts call it directly with the
+    flags below.
 
-    method : 'wilcoxon'
-        scanpy one-vs-rest Wilcoxon (normal approximation); the only test. Kept as a
-        parameter so existing calls passing method='wilcoxon' still work.
-    require_specificity : bool
-        Add the pts/pts_rest > 1 term (gene detected in a larger fraction of the
-        domain than outside). Off in detection: against all other
-        cells of the type it is near-redundant once pts >= min_pts and logFC >=
-        min_logfc hold (kidney: 0.07% of ct-SVGs at 0.8/1.5). Kept only for the
-        sensitivity scripts. pts_rest == 0 counts as specific.
-    pval_adjust : 'scanpy'
-        scanpy's per-domain BH-adjusted p-value is always reported as `pvals_adj`.
-        Kept as a parameter so existing calls passing pval_adjust='scanpy' still work.
+    Test: scanpy one-vs-rest Wilcoxon (normal approximation); `pvals_adj` is scanpy's
+    per-domain BH-adjusted p-value.
     pval_thresh : float or None
         Cutoff applied to the adjusted p-value (None: no p-value filter).
     filter_mode : 'drop' | 'annotate' | 'none'
-        How the pts/logfc/specificity/pval mask is applied. 'drop' removes failing
+        How the pts/logfc/pval mask is applied. 'drop' removes failing
         rows; 'annotate' keeps all rows and adds a `passes_filter` column; 'none'
         keeps all rows with no mask.
 
     Columns: gene, domain, scores, logfoldchanges, pts, pts_rest, pval, pvals_adj
              [, passes_filter if annotate].
     """
-    if method != 'wilcoxon':
-        raise ValueError(f"method={method!r}: only 'wilcoxon' is supported")
-    if pval_adjust != 'scanpy':
-        raise ValueError(f"pval_adjust={pval_adjust!r}: only 'scanpy' is supported")
     # dedup_spots=True (default, Spotiphy): same-spot same-CT cells are exact
     # deconvolution duplicates -> collapse to unique spots so the Wilcoxon test
     # (and pts) treats each spot as one observation, not N identical replicates.
@@ -177,11 +116,8 @@ def _compute_spatial_de_table(
     df = _run_wilcoxon_per_domain(adata, key, rg)
     df.rename(columns={'names': 'gene', 'pvals': 'pval'}, inplace=True)
 
-    # passing mask: prevalence + fold change (+ optional specificity + optional p)
+    # passing mask: prevalence + fold change (+ optional p)
     mask = (df['pts'] >= min_pts) & (df['logfoldchanges'] >= min_logfc)
-    if require_specificity:
-        ratio = df['pts'] / df['pts_rest'].replace(0, np.nan)
-        mask &= (ratio > 1) | df['pts_rest'].eq(0)
     if pval_thresh is not None:
         mask &= df['pvals_adj'] < pval_thresh
 
@@ -197,24 +133,6 @@ def _compute_spatial_de_table(
     return df[cols].reset_index(drop=True)
 
 
-def compute_spatial_de_genes(adata,
-                             key: str = 'domain',
-                             min_pts: float = 0.8,
-                             min_logfc: float = 1.5,
-                             rank_by: str = 'scores',
-                             dedup_spots: bool = True,
-                            ):
-    """Detection path: filtered spatial DE genes per domain, as {domain: df}.
-
-    Wilcoxon, pts/logFC thresholds, and scanpy BH-adjusted p < DETECTION_ALPHA.
-    Returns {domain: DataFrame} sorted by `rank_by`; each df carries the columns
-    create_svg_list consumes (`names`, `scores`/rank_by, `pvals_adj`). Same single
-    DE pass and split as compute_svg_results (which also returns the gene table).
-    """
-    flat = _de_table_all(adata, key, dedup_spots)
-    return _split_de_table(flat, min_pts, min_logfc, rank_by)[0]
-
-
 GENE_TABLE_COLUMNS = ['CombinedPvals', 'adj_pval', 'scores', 'logfoldchanges',
                       'pts', 'pts_rest', 'best_domain', 'passes_filter']
 
@@ -222,8 +140,8 @@ GENE_TABLE_COLUMNS = ['CombinedPvals', 'adj_pval', 'scores', 'logfoldchanges',
 def _de_table_all(adata, key: str = 'domain', dedup_spots: bool = True):
     """One Wilcoxon pass: every (gene, domain) row, unfiltered, with scanpy BH `pvals_adj`."""
     return _compute_spatial_de_table(
-        adata, key=key, method='wilcoxon', min_pts=0.0, min_logfc=-np.inf,
-        pval_adjust='scanpy', filter_mode='none', dedup_spots=dedup_spots,
+        adata, key=key, min_pts=0.0, min_logfc=-np.inf,
+        filter_mode='none', dedup_spots=dedup_spots,
     )
 
 
@@ -247,7 +165,7 @@ def _split_de_table(flat, min_pts, min_logfc, rank_by='scores', genes=None):
     called = passes & (flat['pvals_adj'] < DETECTION_ALPHA)
 
     det = flat[called].rename(columns={'gene': 'names'})
-    ascending = rank_by != 'scores'
+    ascending = rank_ascending(rank_by)
     domain_svgs = {g: d.sort_values(rank_by, ascending=ascending).reset_index(drop=True)
                    for g, d in det.groupby('domain')}
 
@@ -290,14 +208,55 @@ def compute_svg_results(adata,
     return _split_de_table(flat, min_pts, min_logfc, rank_by, genes)
 
 
-def compute_ct_svg_results(cell_type: str, **kwargs):
+def compute_ct_svg_results(
+    cell_type: str,
+    key: str = 'domain',
+    min_pts: float = 0.8,
+    min_logfc: float = 1.5,
+    rank_by: str = 'scores',
+    dedup_spots: bool = True,
+):
     """compute_svg_results on one cell type's spatial data (ct-SVGs)."""
-    return compute_svg_results(load_ct_spatial_data(cell_type), **kwargs)
+    return compute_svg_results(load_ct_spatial_data(cell_type), key=key, min_pts=min_pts,
+                               min_logfc=min_logfc, rank_by=rank_by, dedup_spots=dedup_spots)
 
 
-def compute_tissue_svg_results(**kwargs):
+def compute_tissue_svg_results(
+    key: str = 'domain',
+    min_pts: float = 0.8,
+    min_logfc: float = 1.5,
+    rank_by: str = 'scores',
+    dedup_spots: bool = True,
+):
     """compute_svg_results on the spot-level (aggregated) ST data (tissue SVGs)."""
-    return compute_svg_results(load_aggr_st_data(), **kwargs)
+    # one row per spot, so dedup_spots has nothing to collapse
+    return compute_svg_results(load_aggr_st_data(), key=key, min_pts=min_pts,
+                               min_logfc=min_logfc, rank_by=rank_by, dedup_spots=dedup_spots)
+
+
+def compute_domain_ct_svgs(
+    cell_type: str,
+    key: str = 'domain',
+    min_pts: float = 0.8,
+    min_logfc: float = 1.5,
+    rank_by: str = 'scores',
+    dedup_spots: bool = True,
+):
+    """ct-SVGs of one cell type per domain, {domain: df}: the lists of compute_ct_svg_results."""
+    return compute_ct_svg_results(cell_type, key=key, min_pts=min_pts, min_logfc=min_logfc,
+                                  rank_by=rank_by, dedup_spots=dedup_spots)[0]
+
+
+def compute_domain_svgs(
+    key: str = 'domain',
+    min_pts: float = 0.8,
+    min_logfc: float = 1.5,
+    rank_by: str = 'scores',
+    dedup_spots: bool = True,
+):
+    """Tissue SVGs per domain, {domain: df}: the lists of compute_tissue_svg_results."""
+    return compute_tissue_svg_results(key=key, min_pts=min_pts, min_logfc=min_logfc,
+                                      rank_by=rank_by, dedup_spots=dedup_spots)[0]
 
 
 
@@ -320,7 +279,7 @@ def create_svg_list(
     domain_svgs, 
     rank_by: str = 'scores'
 ):
-    
+    ascending = rank_ascending(rank_by)
     all_genes = {}
     for group in domain_svgs.keys():
         genes_group = domain_svgs[group]
@@ -332,7 +291,8 @@ def create_svg_list(
                 all_genes[name] = (score, pvals_adj, group)
             else:
                 current_score, _, _ = all_genes[name]
-                if score > current_score:
+                better = score < current_score if ascending else score > current_score
+                if better:
                     all_genes[name] = (score, pvals_adj, group)
 
     # sort by
@@ -343,7 +303,7 @@ def create_svg_list(
         all_genes,
         orient="index",
         columns = ['scores', 'adjusted p-vals', 'region']
-    ).sort_values(['region', 'scores'], ascending=[True, False])
+    ).sort_values(['region', 'scores'], ascending=[True, ascending])
 
     return all_genes_df
 
