@@ -1,6 +1,5 @@
 import ast
 import json
-import torch
 
 import numpy as np
 from skimage.draw import polygon
@@ -8,8 +7,6 @@ from pathlib import Path
 import pandas as pd
 import scanpy as sc
 
-from scipy.sparse.csc import csc_matrix
-from scipy.sparse.csr import csr_matrix
 
 def filter(adata, is_mt_gene=None, min_genes=20, min_locs=20, max_genes=None, max_locs=None):
     sc.pp.calculate_qc_metrics(adata, percent_top=None, inplace=True)
@@ -24,17 +21,6 @@ def filter(adata, is_mt_gene=None, min_genes=20, min_locs=20, max_genes=None, ma
     sc.pp.filter_genes(adata, min_cells=min_locs, max_cells=max_locs)
     
     return adata
-
-def compute_hvgs(adata):
-    sc.pp.highly_variable_genes(adata, flavor="seurat_v3", n_top_genes=3000)
-
-def preprocess(adata, target_sum = None, max_value = None, scale=False):
-    adata.layers['original'] = adata.X.copy()
-    sc.pp.normalize_total(adata, target_sum=target_sum)
-    sc.pp.log1p(adata)
-    if scale:
-        sc.pp.scale(adata, zero_center=False, max_value=max_value)
-        adata.X = adata.X.astype('float32')
 
 def get_annotation(
     host="www.ensembl.org", 
@@ -154,20 +140,3 @@ def set_segmentation_masks(adata, segmentation_boundary):
     adata.obs["segmentation"] = seg_ids
     
     print(f"Prepared hires segmentation: {seg_mask.shape}, {seg_mask.max()} cells")
-
-def get_common_geneset(adata_st, adata_sc):
-    st_hvg = adata_st.var[adata_st.var['highly_variable']].index
-    sc_hvg = adata_sc.var[adata_sc.var['highly_variable']].index
-
-    geneset = st_hvg.intersection(sc_hvg)
-
-    print(f"Number of overlap genes: {len(geneset)}")
-    return geneset
-
-def get_feature_matrix(adata):
-    if isinstance(adata.X, csc_matrix) or isinstance(adata.X, csr_matrix):
-       feat = adata.X.toarray()
-    else:
-       feat = adata.X
-    print(type(feat))
-    return torch.tensor(feat)

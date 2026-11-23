@@ -1,10 +1,7 @@
 import torch
 
-from dataclasses import dataclass, field
-
-from collections import namedtuple
 from torch.utils.data import Dataset
-from typing import NamedTuple, Optional
+from typing import NamedTuple
 
 from ...data import STHypergraphData
 
@@ -36,15 +33,6 @@ class STHypergraphBatchMatrixData(NamedTuple):
             neighborhood_incidence_matrix = self.neighborhood_incidence_matrix.to(device),
         )
     
-STHypergraphBatchListData = namedtuple("STHypergraphBatchListData", ["n_cells", 
-                                                             "n_hyperedges",
-                                                             "batch_cells",
-                                                             "batch_hyperedges",
-                                                             "cell_feats",
-                                                             "hyperedge_feats",
-                                                             "cell_types",
-                                                             "hyperedge_index"])
-
 class STHypergraphDataset(Dataset):
     def __init__(self, 
                  hypergraph: STHypergraphData):
@@ -56,6 +44,4 @@ class STHypergraphDataset(Dataset):
         self.cell_types = hypergraph['cell_types']
         self.num_cell_types = hypergraph['num_cell_types']
 
-from .list_dataset import STHypergraphListDataset
 from .matrix_dataset import STHypergraphMatrixDataset
-from .sparse_dataset import STHypergraphSparseDataset
