@@ -14,8 +14,11 @@ from ..utils import load_ct_spatial_data, save_ct_spatial_data, load_decomposed_
 def build_hyperedge_feats(adata_st, spot_name_to_index, n_hyperedge_feats=256):
     """Per-spot pseudobulk target for the hyperedge reconstruction head.
 
-    Hyperedge s is 1:1 with spot s. Its members are the cells of spot s and of
-    its k-1 nearest spots (knn_graph with loop=True). The decoder pools the
+    Hyperedge s is 1:1 with spot s. Each cell joins the hyperedges of its own
+    spot and of that spot's k-1 nearest spots (knn_graph with loop=True), so
+    hyperedge s holds the cells of every spot that lists s among its k nearest:
+    spot s and its k-1 neighbours in the interior, more or fewer spots along
+    tissue edges. The decoder pools the
     embeddings of all members and predicts spot s's own pseudobulk from them.
     Spot s's cells are among the pooled members, so the target is partly
     reconstructed from those cells' own embeddings; it is not a prediction of

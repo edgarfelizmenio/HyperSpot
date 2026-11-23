@@ -180,7 +180,7 @@ print("RCC-EMT vs Myeloid-IL1B: all-cospots r=%.3f ; Myeloid-rich(>=3) r=%.3f (n
 C.append(md(r"""## 6. Can the hyperedge (neighbourhood) scale resolve the Myeloid sparsity?
 
 Since "IL1B⁺ myeloid *near* EMT-RCC" is a neighbourhood relationship, we pool Myeloid cells over each spot's
-7-nearest-neighbour spot neighbourhood (HyperSpot's native **hyperedge** unit) — giving ~6× more cells and a
+7-nearest-neighbour spot neighbourhood (≈ HyperSpot's **hyperedge**; the two differ only along tissue edges) — giving ~6× more cells and a
 more stable IL1B estimate. We then test the coupling with two nulls: a naive free permutation, and a
 spatial-autocorrelation-preserving **rotation null** (rigidly rotate the Myeloid field and recompute)."""))
 C.append(code(r"""from sklearn.neighbors import NearestNeighbors
@@ -283,7 +283,7 @@ C.append(md(r"""## Summary — honest read
   headline biology falls out of the representation without supervision, consistently across sections.
 - **IL1B-high Myeloid domain: present in both sections.**
 - **The EMT↔IL1B coupling is not recovered in either section.** Per spot the association is null (Myeloid is
-  deconvolution-sparse, ~2 cells/spot, IL1B CV≈3.2). Pooling over the hyperedge (7-NN spot neighbourhood)
+  deconvolution-sparse, ~2 cells/spot, IL1B CV≈3.2). Pooling over the 7-NN spot neighbourhood (≈ the hyperedge)
   resolves the *sparsity* (~6× more cells, CV≈1.8) and gives a nominal weak effect, but under a
   spatial-autocorrelation-preserving **rotation null** it is non-significant in both sections and the **sign
   flips** (Interface r≈+0.06, p≈0.5; Core r≈−0.06, p≈0.17). An inconsistent sign across sections is the
