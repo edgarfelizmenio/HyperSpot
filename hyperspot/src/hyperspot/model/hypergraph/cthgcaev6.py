@@ -26,9 +26,31 @@ class HyperedgeDecoder(nn.Module):
         return self.net(hyperedge_embeddings)
 
 
+class Incidence:
+    """The batch incidence matrix H (sparse 0/1, cells x hyperedges) with the two products the model uses,
+    H.t() @ X and H @ Y, computed as sums over the membership pairs in a fixed order. This is bitwise
+    repeatable on the GPU, so seeded runs reproduce; torch.sparse.mm (cuSPARSE) is not."""
+
+    def __init__(self, H):
+        H = H.coalesce()                                            # pairs sorted by cell
+        self.cells, self.hyperedges = H.indices()
+        n_cells, n_hyperedges = H.shape
+        self.cell_degree = torch.bincount(self.cells, minlength=n_cells)
+        self.hyperedge_degree = torch.bincount(self.hyperedges, minlength=n_hyperedges)
+        self.cells_by_hyperedge = self.cells[torch.argsort(self.hyperedges, stable=True)]
+
+    def to_hyperedges(self, X):
+        """H.t() @ X: per hyperedge, the sum over its cells."""
+        return torch.segment_reduce(X[self.cells_by_hyperedge], "sum", lengths=self.hyperedge_degree)
+
+    def to_cells(self, Y):
+        """H @ Y: per cell, the sum over its hyperedges."""
+        return torch.segment_reduce(Y[self.hyperedges], "sum", lengths=self.cell_degree)
+
+
 def _norms(H):
-    dv = H.sum(dim=1)
-    de = H.sum(dim=0)
+    dv = H.cell_degree.float()
+    de = H.hyperedge_degree.float()
     dvi = dv ** -0.5
     dvi[dvi == float('inf')] = 0
     dei = de ** -1.0
@@ -142,14 +164,13 @@ class CTHGEncoder(nn.Module):
         nn.init.zeros_(self.edge_bias)
         nn.init.zeros_(self.node_bias)
 
-    def forward(self, node_feats, cell_types, incidence_matrix):
-        H = incidence_matrix
+    def forward(self, node_feats, cell_types, H):
         dvi, dei = _norms(H)
 
         m = self.W_ct(node_feats, cell_types)                       # P0
         m_in = self.in_ct(m, cell_types)                            # P0~
-        h = dei.unsqueeze(1) * (H.t() @ (dvi.unsqueeze(1) * self.node_conv(m_in))) + self.edge_bias
-        u = dvi.unsqueeze(1) * (H @ self.hyperedge_conv(self.act(h))) + self.node_bias
+        h = dei.unsqueeze(1) * H.to_hyperedges(dvi.unsqueeze(1) * self.node_conv(m_in)) + self.edge_bias
+        u = dvi.unsqueeze(1) * H.to_cells(self.hyperedge_conv(self.act(h))) + self.node_bias
         un = self.norm_u(u)                                         # LN_P(P)
         z = un + self.norm_m(m)                                     # + LN_0(P0)
         return z, h, un
@@ -188,8 +209,7 @@ class CTHGDecoder(nn.Module):
         nn.init.zeros_(self.he_bias)
         self.output_proj.reset_parameters()
 
-    def forward(self, node_embeddings, cell_types, incidence_matrix):
-        H = incidence_matrix
+    def forward(self, node_embeddings, cell_types, H):
         dvi, dei = _norms(H)
         # z -> shared MLP -> (node_emb | m)
         split = self.split(node_embeddings)
@@ -199,7 +219,7 @@ class CTHGDecoder(nn.Module):
         # node_emb -> hyperedge_conv (node->edge) -> hyperedge expression
         hyperedge_reconstruction = None
         if self.he_out is not None:
-            he = dei.unsqueeze(1) * (H.t() @ (dvi.unsqueeze(1) * self.he_conv(node_emb))) + self.he_bias
+            he = dei.unsqueeze(1) * H.to_hyperedges(dvi.unsqueeze(1) * self.he_conv(node_emb)) + self.he_bias
             hyperedge_reconstruction = self.he_out(he)
         return node_reconstruction, hyperedge_reconstruction
 
@@ -214,10 +234,9 @@ class CTHGCAEv6(nn.Module):
                                    hyperedge_feat_dim, dropout=dropout)
 
     def forward(self, node_feats, cell_types, incidence_matrix):
-        z, h, un = self.encoder(node_feats, cell_types, incidence_matrix)
-        node_reconstruction, hyperedge_reconstruction = self.decoder(
-            z, cell_types, incidence_matrix
-        )
+        H = Incidence(incidence_matrix)
+        z, h, un = self.encoder(node_feats, cell_types, H)
+        node_reconstruction, hyperedge_reconstruction = self.decoder(z, cell_types, H)
         # un (post-norm neighborhood branch) appended at index 4 so indices 0-3
         # (z, h, node_recon, he_recon) stay stable for all positional consumers.
         return z, h, node_reconstruction, hyperedge_reconstruction, un

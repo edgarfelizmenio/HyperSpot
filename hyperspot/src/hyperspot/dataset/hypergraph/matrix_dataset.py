@@ -15,7 +15,12 @@ class STHypergraphMatrixDataset(STHypergraphDataset):
                  device: torch.device | str | None = None):
         super(STHypergraphMatrixDataset, self).__init__(hypergraph)
 
-        self.incidence_matrix = hypergraph['incidence_matrix']
+        # Hypergraph membership as (cell, hyperedge) pairs: cell hyperedge_index[0, i] is in hyperedge
+        # hyperedge_index[1, i]. Batches are built from these pairs, never from a dense cells x hyperedges
+        # matrix, so memory and time grow with the number of memberships (~7 per cell).
+        self.hyperedge_index = hypergraph['hyperedge_index'].long()
+        self.num_cells = self.cell_feats.shape[0]
+        self.num_hyperedges = self.hyperedge_feats.shape[0]
 
         # Neighborhood-sampling ratios (GraphSAGE-style fan-out control), applied
         # per expansion hop so a minibatch stays bounded instead of inducing the
@@ -27,25 +32,16 @@ class STHypergraphMatrixDataset(STHypergraphDataset):
         self.K = K
         self.M = M
 
-        # Optional: keep the graph tensors on `device` (e.g. the training GPU) and build every batch there.
-        # A batch's 2-hop subgraph spans most of the tissue, so slicing the dense incidence matrix on the CPU
-        # and copying the slice to the GPU at every step dominates training time on large datasets. Same
-        # sampling logic as the CPU path; only the RNG stream differs (randperm runs on the device).
-        # A 0/1 incidence matrix is kept as bool on the device (4x smaller); batch slices are cast back.
+        # Optional: keep the graph tensors on `device` (e.g. the training GPU) and build every batch there,
+        # so a batch's features need no copy at every step. Same sampling logic as on the CPU; only the
+        # RNG stream differs (randperm runs on the device).
         self.device = torch.device(device) if device is not None else torch.device("cpu")
-        self._incidence_dtype = self.incidence_matrix.dtype
         if self.device.type != "cpu":
-            incidence = self.incidence_matrix
-            if bool(((incidence == 0) | (incidence == 1)).all()):
-                incidence = incidence.bool()
-            self.incidence_matrix = incidence.to(self.device)
+            self.hyperedge_index = self.hyperedge_index.to(self.device)
             self.cell_feats = self.cell_feats.to(self.device)
             self.hyperedge_feats = self.hyperedge_feats.to(self.device)
             self.cell_to_spot_id = self.cell_to_spot_id.to(self.device)
             self.cell_types = self.cell_types.to(self.device)
-
-        # optimization notes:
-        # 1. getting neighboring hyperedges is faster if you have the edge_index (get 2-hop neighbors)
 
     def _sample(self, ids: torch.Tensor, ratio: float) -> torch.Tensor:
         """Randomly keep ceil(ratio * len) of a 1-D index tensor (no-op at ratio >= 1)."""
@@ -57,120 +53,98 @@ class STHypergraphMatrixDataset(STHypergraphDataset):
             return ids
         return ids[torch.randperm(n, device=ids.device)[:k]]
 
+    def _hyperedges_of(self, cells: torch.Tensor, exclude: torch.Tensor) -> torch.Tensor:
+        """Sorted ids of the hyperedges that contain any cell in the mask `cells`, minus those in `exclude`."""
+        ids = self.hyperedge_index[1][cells[self.hyperedge_index[0]]].unique()
+        return ids[~exclude[ids]]
+
+    def _cells_of(self, hyperedges: torch.Tensor, exclude: torch.Tensor) -> torch.Tensor:
+        """Sorted ids of the cells in any hyperedge in the mask `hyperedges`, minus those in `exclude`."""
+        ids = self.hyperedge_index[0][hyperedges[self.hyperedge_index[1]]].unique()
+        return ids[~exclude[ids]]
+
     def __len__(self):
-        return self.cell_feats.shape[0]
-        
+        return self.num_cells
+
     def __getitem__(self, idx: List[int]) -> STHypergraphBatchMatrixData:
         '''
         Get sub-hypergraph induced by cells indicated by idx
             Params: idx - index of the cells
         '''
         # Initialize filtering flags
-        selected_cells = torch.zeros(self.cell_feats.shape[0], dtype=bool, device=self.device)
-        selected_hyperedges = torch.zeros(self.hyperedge_feats.shape[0], dtype=bool, device=self.device)
+        selected_cells = torch.zeros(self.num_cells, dtype=bool, device=self.device)
+        selected_hyperedges = torch.zeros(self.num_hyperedges, dtype=bool, device=self.device)
 
         # 1. Get initial set of cells based on index.
         initial_cell_ids = torch.tensor(idx, device=self.device).unique()
         selected_cells[initial_cell_ids] = True
-        
+
         # 2. Get initial hyperedges (main spots where the cells are located).
         initial_hyperedge_ids = self.cell_to_spot_id[initial_cell_ids].unique()
         selected_hyperedges[initial_hyperedge_ids] = True
 
-        # 3. Get all one-hop Hyperedges. These are hyperedges adjacent to initial nodes.
-        # Required data for commanality computation of initial nodes
-        one_hop_hyperedges = (self.incidence_matrix[selected_cells].bool() & ~selected_hyperedges).any(dim=0)
-        one_hop_hyperedge_ids = one_hop_hyperedges.nonzero(as_tuple=True)[0]
+        # 3. One-hop hyperedges: the other hyperedges of the initial cells.
+        one_hop_hyperedge_ids = self._hyperedges_of(selected_cells, selected_hyperedges)
         one_hop_hyperedge_ids = self._sample(one_hop_hyperedge_ids, self.K)   # fan-out cap
-        # selected_hyperedges[one_hop_hyperedge_ids] = True
-        
-        # 4. Get all nodes adjacent to initial hyperedges.
-        # Required data for commonality computation of initial hyperedges
-        initial_hyperedge_cells = (self.incidence_matrix[:,selected_hyperedges].bool() & (~selected_cells)[:, None]).any(dim=1)
-        initial_hyperedge_cell_ids = initial_hyperedge_cells.nonzero(as_tuple=True)[0]
+
+        # 4. Cells of the initial hyperedges (before the one-hop hyperedges are added).
+        initial_hyperedge_cell_ids = self._cells_of(selected_hyperedges, selected_cells)
         initial_hyperedge_cell_ids = self._sample(initial_hyperedge_cell_ids, self.M)   # fan-out cap
         selected_cells[initial_hyperedge_cell_ids] = True
 
         # only update this here, after nodes of initial hyperedges have been identified
-        selected_hyperedges[one_hop_hyperedge_ids] = True        
+        selected_hyperedges[one_hop_hyperedge_ids] = True
 
-        # get first hyperedges - 
-        # 4. hyperedges adjacent to node -> torch.isin(self.edge_index[0], cell_ids)
-        # 5. hyperedges that are not the spots of indicated cells -> ~torch.isin(self.edge_index[0],hyperedge_ids)
-        # one_hop_hyperedges = torch.nonzero(self.incidence_matrix.bool() & (selected_cells[:, None] & ~selected_hyperedges[None, :]), as_tuple=True)
-        # incident_hyperedges = one_hop_hyperedges[1]
-        # selected_hyperedges[incident_hyperedges] = True
-
-        
-        # # 6. get neighboring cells
-        # # - cells found in incident hyperedges
-        # # - cells not yet in current sample        
-        # one_hop_cells = torch.nonzero(self.incidence_matrix.bool() & (~selected_cells[:, None] & selected_hyperedges[None, :]), as_tuple=True)
-        # neighboring_cell_ids = one_hop_cells[0]
-        # selected_cells[neighboring_cell_ids] = True
-        # # print(cell_ids, neighbor_cell_ids)
-        one_hop_cells = (self.incidence_matrix[:, selected_hyperedges].bool() & (~selected_cells)[:, None]).any(dim=1)
-        one_hop_cell_ids = one_hop_cells.nonzero(as_tuple=True)[0]
+        # 5. One-hop cells: the remaining cells of the initial and one-hop hyperedges.
+        one_hop_cell_ids = self._cells_of(selected_hyperedges, selected_cells)
         one_hop_cell_ids = self._sample(one_hop_cell_ids, self.M)   # fan-out cap
         selected_cells[one_hop_cell_ids] = True
-        
-        # # 7. Get neighbor incident hyperedges
-        # # - hyperedges incident to neighbor cells
-        # # - hyperedges not yet in current hyperedge list
-        # two_hop_hyperedges = torch.nonzero(self.incidence_matrix.bool() & (selected_cells[:, None] & ~selected_hyperedges[None, :]), as_tuple=True)
-        # neighboring_cell_hyperedge_ids = two_hop_hyperedges[1]
-        # selected_hyperedges[neighboring_cell_hyperedge_ids] = True
-        two_hop_hyperedges = (self.incidence_matrix[selected_cells].bool() & ~selected_hyperedges).any(dim=0)
-        two_hop_hyperedge_ids = two_hop_hyperedges.nonzero(as_tuple=True)[0]
+
+        # 6. Two-hop hyperedges: the other hyperedges of all selected cells
+        # (two-hop hyperedges are required for edge convolution).
+        two_hop_hyperedge_ids = self._hyperedges_of(selected_cells, selected_hyperedges)
         two_hop_hyperedge_ids = self._sample(two_hop_hyperedge_ids, self.K)   # fan-out cap
         selected_hyperedges[two_hop_hyperedge_ids] = True
 
         # get the induced subgraph using the selected cells and hyperedges
-        # two-hop hyperedges are required for edge convolution
-        batch_subgraph_cells = torch.cat((initial_cell_ids, initial_hyperedge_cell_ids, one_hop_cell_ids)).squeeze()
-        batch_subgraph_hyperedges = torch.cat((initial_hyperedge_ids, one_hop_hyperedge_ids, two_hop_hyperedge_ids)).squeeze()
+        batch_subgraph_cells = torch.cat((initial_cell_ids, initial_hyperedge_cell_ids, one_hop_cell_ids))
+        batch_subgraph_hyperedges = torch.cat((initial_hyperedge_ids, one_hop_hyperedge_ids, two_hop_hyperedge_ids))
 
         # number of cells and hyperedges for gradient computation
         sample_n_cells = initial_cell_ids.shape[0]
         sample_n_hyperedges = initial_hyperedge_ids.shape[0]
         neighborhood_n_cells = sample_n_cells + initial_hyperedge_cell_ids.shape[0]
         neighborhood_n_hyperedges = sample_n_hyperedges + one_hop_hyperedge_ids.shape[0]
-        # subgraph_nodes = torch.cat((cell_ids, neighbor_node_ids))        
-        # subgraph_edges = torch.cat((edge_ids, neighbor_edge_ids)).unique()
-        # spot_expression = self.x_spot[subgraph_hyperedges]
 
-        # print(subgraph_cells)
-        # print(subgraph_hyperedges)
-        
-        # sample edges
-        # discard nodes not adjacent to edges
-        # if len(all_nodes) < node_sample_size, do not sample
-        # sample node_sample_size - len(idx) from all_nodes / node_sample_size 
-        
         batch_cell_feats = self.cell_feats[batch_subgraph_cells]
         batch_hyperedge_feats = self.hyperedge_feats[batch_subgraph_hyperedges]
         batch_cell_types = self.cell_types[batch_subgraph_cells]
-        
-        # .to() is a no-op unless the incidence matrix is stored as bool on the device
-        batch_incidence_matrix = self.incidence_matrix[batch_subgraph_cells][:, batch_subgraph_hyperedges].to(self._incidence_dtype)
-        neighborhood_incidence_matrix = self.incidence_matrix[batch_subgraph_cells[:neighborhood_n_cells]][:, batch_subgraph_hyperedges[:neighborhood_n_hyperedges]].to(self._incidence_dtype)
 
-        # TODO move remap on model
-        # remapped_cells = hyperedge_index[0].unique(return_inverse=True)[1]
-        # remapped_edges = hyperedge_index[1].unique(return_inverse=True)[1]
-        # remapped_hyperedge_index = torch.stack((remapped_cells, remapped_edges))
+        # Sparse batch incidence matrix: the membership pairs whose cell and hyperedge are both in the batch,
+        # renumbered to their positions in batch_subgraph_cells / batch_subgraph_hyperedges.
+        cell_pos = torch.full((self.num_cells,), -1, dtype=torch.long, device=self.device)
+        cell_pos[batch_subgraph_cells] = torch.arange(batch_subgraph_cells.shape[0], device=self.device)
+        hyperedge_pos = torch.full((self.num_hyperedges,), -1, dtype=torch.long, device=self.device)
+        hyperedge_pos[batch_subgraph_hyperedges] = torch.arange(batch_subgraph_hyperedges.shape[0], device=self.device)
+        rows = cell_pos[self.hyperedge_index[0]]
+        cols = hyperedge_pos[self.hyperedge_index[1]]
+        in_batch = (rows >= 0) & (cols >= 0)
+        batch_incidence_matrix = torch.sparse_coo_tensor(
+            torch.stack((rows[in_batch], cols[in_batch])),
+            torch.ones(int(in_batch.sum()), device=self.device),
+            size=(batch_subgraph_cells.shape[0], batch_subgraph_hyperedges.shape[0]),
+        ).coalesce()
 
         # sample_* -> initial indicated by batch_size parameter
-        # neigborhood_* -> immediate neighborhood of sample cells and hyperedges (used in computing contrastive loss)
+        # neigborhood_* -> immediate neighborhood of sample cells and hyperedges (rows the training loss uses)
         # batch_* -> entire batch of cells and hyperedges using in forward pass
-        return STHypergraphBatchMatrixData(sample_n_cells, 
+        return STHypergraphBatchMatrixData(sample_n_cells,
                                      sample_n_hyperedges,
                                      neighborhood_n_cells,
                                      neighborhood_n_hyperedges,
-                                     batch_subgraph_cells, 
-                                     batch_subgraph_hyperedges, 
-                                     batch_cell_feats, 
-                                     batch_hyperedge_feats, 
-                                     batch_cell_types, 
-                                     batch_incidence_matrix,
-                                     neighborhood_incidence_matrix)
+                                     batch_subgraph_cells,
+                                     batch_subgraph_hyperedges,
+                                     batch_cell_feats,
+                                     batch_hyperedge_feats,
+                                     batch_cell_types,
+                                     batch_incidence_matrix)

@@ -11,16 +11,16 @@ class STHypergraphData(object):
                 cell_to_spot_id,
                 cell_types,
                 hyperedge_index,
-                incidence_matrix,
                 num_cell_types,
                 num_spots):
+        # hyperedge_index: (2, n_memberships) long, cell hyperedge_index[0, i] is in hyperedge hyperedge_index[1, i].
+        # No dense cells x hyperedges incidence matrix is kept (it grows with cells x spots).
         self._data = {
             "cell_feats": cell_feats,
             "hyperedge_feats": hyperedge_feats,
             "cell_to_spot_id": cell_to_spot_id,
             "cell_types": cell_types,
             "hyperedge_index": hyperedge_index,
-            "incidence_matrix": incidence_matrix,
             "num_cell_types": num_cell_types,
             "num_spots": num_spots
         }
@@ -35,6 +35,7 @@ class STHypergraphData(object):
     @staticmethod
     def load():
         proj_metadata = ProjectMetadata()
+        # hypergraphs saved before the sparse rewrite also hold a dense "incidence_matrix"; it is not used
         data = torch.load(proj_metadata.project_folder / "hypergraph.pth")
         return STHypergraphData(
             data["cell_feats"],
@@ -42,7 +43,6 @@ class STHypergraphData(object):
             data["cell_to_spot_id"],
             data["cell_types"],
             data["hyperedge_index"],
-            data["incidence_matrix"],
             data["num_cell_types"],
             data["num_spots"]
         )

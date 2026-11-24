@@ -129,10 +129,6 @@ def create_hypergraph_data(adata_st, n_features=3000, num_neighbor_spots=7,
     spot_in_hyperedge[edge_index[0], edge_index[1]] = True
     hyperedge_index = spot_in_hyperedge[cell_to_spot_id].nonzero().t()
 
-    # derive the binary incidence matrix from hyperedge index
-    incidence_matrix = torch.zeros((cell_ids.shape[0], adata_st.n_obs), dtype=torch.float)
-    incidence_matrix[hyperedge_index[0], hyperedge_index[1]] = 1.0
-
     # hyperedge feats: spot-basis pseudobulk target for hyperedge-embedding
     # reconstruction (global HVG; cell-less spots -> all-zero rows, masked
     # out in the loss). Indexed by hyperedge id == spot index (length num_spots).
@@ -144,12 +140,10 @@ def create_hypergraph_data(adata_st, n_features=3000, num_neighbor_spots=7,
     n_cell_types = project_metadata.n_cell_types
     n_spots = adata_st.n_obs
 
-    # return cell_ids, cell_feats, cell_to_spot_id, cell_types, hyperedge_index, incidence_matrix, n_cell_types, n_spots
     return STHypergraphData(cell_feats,
                             hyperedge_feats,
                             cell_to_spot_id,
                             cell_types,
                             hyperedge_index,
-                            incidence_matrix,
                             n_cell_types,
                             n_spots)
