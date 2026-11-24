@@ -44,8 +44,11 @@ def HyperSpot_eval_pipeline(
     seed: int = 42,
     K: float = 0.7,
     M: float = 0.7,
+    embed_K: float = 1.0,
+    embed_M: float = 1.0,
 ):
-    # K / M: fraction of neighborhood hyperedges / cells sampled, in training and in inference.
+    # K / M: fraction of neighborhood hyperedges / cells sampled in training;
+    # embed_K / embed_M: the same in inference (1.0 = full neighborhoods).
     # clustering / ct_clustering: keyword arguments for compute_spatial_clusters /
     # compute_ct_spatial_clusters (tissue / cell-type domains); empty -> their defaults.
     clustering = dict(clustering or {})
@@ -71,8 +74,8 @@ def HyperSpot_eval_pipeline(
                                 args,
                                 batch_size,
                                 accelerator,
-                                K=K,
-                                M=M)
+                                K=embed_K,
+                                M=embed_M)
 
     clustering_driver = HyperSpotClustering()
 
@@ -117,6 +120,8 @@ def run_eval(
     n=len(EVAL_SEEDS),
     K: float = 0.7,
     M: float = 0.7,
+    embed_K: float = 1.0,
+    embed_M: float = 1.0,
 ):
 
     n = min(n, len(EVAL_SEEDS))
@@ -162,6 +167,8 @@ def run_eval(
             seed=seed,
             K=K,
             M=M,
+            embed_K=embed_K,
+            embed_M=embed_M,
         )
 
 class ClusterEvaluation(object):

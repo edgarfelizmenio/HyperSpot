@@ -165,10 +165,10 @@ class HypergraphEmbedderDriver(object):
                            embedder_args: HypergraphEmbedderArgs,
                            batch_size: int,
                            accelerator: AcceleratorOptions,
-                           K: float = 0.7,
-                           M: float = 0.7):
-        # K/M neighborhood sampling uses torch's RNG, which is NOT seeded here:
-        # call hyperspot.utils.set_seed(seed) at the entry point for reproducible embeddings.
+                           K: float = 1.0,
+                           M: float = 1.0):
+        # Default: full neighborhoods (no sampling). With K/M < 1 the sampling uses torch's RNG, which is NOT
+        # seeded here: call hyperspot.utils.set_seed(seed) at the entry point for reproducible embeddings.
 
         project_metadata = ProjectMetadata()
 

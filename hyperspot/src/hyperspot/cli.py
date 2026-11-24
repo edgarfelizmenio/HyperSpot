@@ -95,6 +95,10 @@ _SAMPLE_HYPEREDGES_HELP = ("Fraction of neighborhood hyperedges kept per hop (fa
                            "1.0 = full neighborhood (no sampling).")
 _SAMPLE_CELLS_HELP = ("Fraction of neighborhood cells kept per hyperedge expansion (fan-out cap, avoids OOM). "
                       "1.0 = full neighborhood (no sampling).")
+_EMBED_SAMPLE_HYPEREDGES_HELP = ("make-embedding step: fraction of neighborhood hyperedges kept per hop. "
+                                 "1.0 = full neighborhood (no sampling).")
+_EMBED_SAMPLE_CELLS_HELP = ("make-embedding step: fraction of neighborhood cells kept per hyperedge expansion. "
+                            "1.0 = full neighborhood (no sampling).")
 _COPY_VAR_COLS_HELP = "var columns to copy from the decomposed AnnData into the aggregated AnnData."
 
 _GENE_SCORES_HELP = ("Also write a per-gene table (*_scores.csv) for benchmarking: every gene with its "
@@ -169,8 +173,8 @@ def train_embedder(
              sort_key=30)
 def make_embedding(
     project: ProjectArgs,
-    sample_hyperedges: Annotated[float, Parameter(help=_SAMPLE_HYPEREDGES_HELP)] = 0.7,
-    sample_cells: Annotated[float, Parameter(help=_SAMPLE_CELLS_HELP)] = 0.7,
+    sample_hyperedges: Annotated[float, Parameter(help=_SAMPLE_HYPEREDGES_HELP)] = 1.0,
+    sample_cells: Annotated[float, Parameter(help=_SAMPLE_CELLS_HELP)] = 1.0,
     common: CommonArgs = CommonArgs(),
     model: EmbedderCLIArgs = EmbedderCLIArgs(),
     runtime: RuntimeArgs = RuntimeArgs(),
@@ -276,8 +280,10 @@ def compute_ct_svgs(project: ProjectArgs, ctsvg: CTSVGArgs = CTSVGArgs()):
 def run_pipeline(
     project: ProjectArgs,
     num_epochs: Annotated[int, Parameter(help="Training epochs.")] = 1000,
-    sample_hyperedges: Annotated[float, Parameter(help=_SAMPLE_HYPEREDGES_HELP)] = 0.7,
-    sample_cells: Annotated[float, Parameter(help=_SAMPLE_CELLS_HELP)] = 0.7,
+    sample_hyperedges: Annotated[float, Parameter(help="train-embedder step: " + _SAMPLE_HYPEREDGES_HELP)] = 0.7,
+    sample_cells: Annotated[float, Parameter(help="train-embedder step: " + _SAMPLE_CELLS_HELP)] = 0.7,
+    embed_sample_hyperedges: Annotated[float, Parameter(help=_EMBED_SAMPLE_HYPEREDGES_HELP)] = 1.0,
+    embed_sample_cells: Annotated[float, Parameter(help=_EMBED_SAMPLE_CELLS_HELP)] = 1.0,
     copy_var_cols: Annotated[
         Optional[List[str]],
         Parameter(consume_multiple=True, help=_COPY_VAR_COLS_HELP)] = None,
@@ -293,7 +299,8 @@ def run_pipeline(
     train_embedder(project, common=common, num_epochs=num_epochs, sample_hyperedges=sample_hyperedges,
                    sample_cells=sample_cells, model=model, runtime=runtime)
     logger.info("run-pipeline 2/6: make-embedding")
-    make_embedding(project, sample_hyperedges=sample_hyperedges, sample_cells=sample_cells, common=common, model=model, runtime=runtime)
+    make_embedding(project, sample_hyperedges=embed_sample_hyperedges, sample_cells=embed_sample_cells, common=common,
+                   model=model, runtime=runtime)
     logger.info("run-pipeline 3/6: compute-spatial-domains")
     compute_spatial_domains(project, clustering=clustering, copy_var_cols=copy_var_cols, common=common)
     logger.info("run-pipeline 4/6: compute-celltype-spatial-domains")
@@ -307,8 +314,10 @@ def run_pipeline(
 def perform_model_evaluation(
     project: ProjectArgs,         
     num_epochs: Annotated[int, Parameter(help="Training epochs.")] = 1000,
-    sample_hyperedges: Annotated[float, Parameter(help=_SAMPLE_HYPEREDGES_HELP)] = 0.7,
-    sample_cells: Annotated[float, Parameter(help=_SAMPLE_CELLS_HELP)] = 0.7,
+    sample_hyperedges: Annotated[float, Parameter(help="train-embedder step: " + _SAMPLE_HYPEREDGES_HELP)] = 0.7,
+    sample_cells: Annotated[float, Parameter(help="train-embedder step: " + _SAMPLE_CELLS_HELP)] = 0.7,
+    embed_sample_hyperedges: Annotated[float, Parameter(help=_EMBED_SAMPLE_HYPEREDGES_HELP)] = 1.0,
+    embed_sample_cells: Annotated[float, Parameter(help=_EMBED_SAMPLE_CELLS_HELP)] = 1.0,
     model: EmbedderCLIArgs = EmbedderCLIArgs(),
     runtime: RuntimeArgs = RuntimeArgs(),
     clustering: ClusterArgs = ClusterArgs(),
@@ -336,6 +345,8 @@ def perform_model_evaluation(
         n=num_runs,
         K=sample_hyperedges,
         M=sample_cells,
+        embed_K=embed_sample_hyperedges,
+        embed_M=embed_sample_cells,
     )
 
 @app.command(help="Check if project folder exists.",
