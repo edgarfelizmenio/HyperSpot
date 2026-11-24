@@ -43,8 +43,11 @@ class HypergraphEmbedderDriver(object):
             embedder_args: HypergraphEmbedderArgs,
             num_epochs: int,
             batch_size: int,
-            accelerator: AcceleratorOptions):
+            accelerator: AcceleratorOptions,
+            K: float = 0.7,
+            M: float = 0.7):
         # RNG is NOT seeded here: call hyperspot.utils.set_seed(seed) at the entry point.
+        # K / M: fraction of neighborhood hyperedges / cells sampled per batch (as in generate_embedding).
 
         project_metadata = ProjectMetadata()
 
@@ -68,8 +71,10 @@ class HypergraphEmbedderDriver(object):
         # use random sampler in training
         logger.info("Learning node and hyperedge embeddings...")
 
-        hgdataset = STHypergraphMatrixDataset(hypergraph)
-        
+        # build batches on the training device: on large datasets slicing the dense incidence
+        # matrix on the CPU and copying it to the GPU every step dominates training time
+        hgdataset = STHypergraphMatrixDataset(hypergraph, K=K, M=M, device=self.device)
+
         logger.info(f"Number of cells: {len(hgdataset)}")
         logger.info(f"Batch Size: {batch_size}")
         

@@ -11,7 +11,8 @@ class STHypergraphMatrixDataset(STHypergraphDataset):
     def __init__(self,
                  hypergraph: STHypergraphData,
                  K: float = 0.7,
-                 M: float = 0.7):
+                 M: float = 0.7,
+                 device: torch.device | str | None = None):
         super(STHypergraphMatrixDataset, self).__init__(hypergraph)
 
         self.incidence_matrix = hypergraph['incidence_matrix']
@@ -26,6 +27,23 @@ class STHypergraphMatrixDataset(STHypergraphDataset):
         self.K = K
         self.M = M
 
+        # Optional: keep the graph tensors on `device` (e.g. the training GPU) and build every batch there.
+        # A batch's 2-hop subgraph spans most of the tissue, so slicing the dense incidence matrix on the CPU
+        # and copying the slice to the GPU at every step dominates training time on large datasets. Same
+        # sampling logic as the CPU path; only the RNG stream differs (randperm runs on the device).
+        # A 0/1 incidence matrix is kept as bool on the device (4x smaller); batch slices are cast back.
+        self.device = torch.device(device) if device is not None else torch.device("cpu")
+        self._incidence_dtype = self.incidence_matrix.dtype
+        if self.device.type != "cpu":
+            incidence = self.incidence_matrix
+            if bool(((incidence == 0) | (incidence == 1)).all()):
+                incidence = incidence.bool()
+            self.incidence_matrix = incidence.to(self.device)
+            self.cell_feats = self.cell_feats.to(self.device)
+            self.hyperedge_feats = self.hyperedge_feats.to(self.device)
+            self.cell_to_spot_id = self.cell_to_spot_id.to(self.device)
+            self.cell_types = self.cell_types.to(self.device)
+
         # optimization notes:
         # 1. getting neighboring hyperedges is faster if you have the edge_index (get 2-hop neighbors)
 
@@ -37,7 +55,7 @@ class STHypergraphMatrixDataset(STHypergraphDataset):
         k = max(1, math.ceil(ratio * n))
         if k >= n:
             return ids
-        return ids[torch.randperm(n)[:k]]
+        return ids[torch.randperm(n, device=ids.device)[:k]]
 
     def __len__(self):
         return self.cell_feats.shape[0]
@@ -48,11 +66,11 @@ class STHypergraphMatrixDataset(STHypergraphDataset):
             Params: idx - index of the cells
         '''
         # Initialize filtering flags
-        selected_cells = torch.zeros(self.cell_feats.shape[0], dtype=bool)
-        selected_hyperedges = torch.zeros(self.hyperedge_feats.shape[0], dtype=bool)       
-        
+        selected_cells = torch.zeros(self.cell_feats.shape[0], dtype=bool, device=self.device)
+        selected_hyperedges = torch.zeros(self.hyperedge_feats.shape[0], dtype=bool, device=self.device)
+
         # 1. Get initial set of cells based on index.
-        initial_cell_ids = torch.tensor(idx).unique()
+        initial_cell_ids = torch.tensor(idx, device=self.device).unique()
         selected_cells[initial_cell_ids] = True
         
         # 2. Get initial hyperedges (main spots where the cells are located).
@@ -133,8 +151,9 @@ class STHypergraphMatrixDataset(STHypergraphDataset):
         batch_hyperedge_feats = self.hyperedge_feats[batch_subgraph_hyperedges]
         batch_cell_types = self.cell_types[batch_subgraph_cells]
         
-        batch_incidence_matrix = self.incidence_matrix[batch_subgraph_cells][:, batch_subgraph_hyperedges]
-        neighborhood_incidence_matrix = self.incidence_matrix[batch_subgraph_cells[:neighborhood_n_cells]][:, batch_subgraph_hyperedges[:neighborhood_n_hyperedges]]
+        # .to() is a no-op unless the incidence matrix is stored as bool on the device
+        batch_incidence_matrix = self.incidence_matrix[batch_subgraph_cells][:, batch_subgraph_hyperedges].to(self._incidence_dtype)
+        neighborhood_incidence_matrix = self.incidence_matrix[batch_subgraph_cells[:neighborhood_n_cells]][:, batch_subgraph_hyperedges[:neighborhood_n_hyperedges]].to(self._incidence_dtype)
 
         # TODO move remap on model
         # remapped_cells = hyperedge_index[0].unique(return_inverse=True)[1]

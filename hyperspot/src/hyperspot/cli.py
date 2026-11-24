@@ -91,10 +91,10 @@ class CTClusterArgs:                # cell-type domains
     min_cluster_pct: float = -1     # min fraction of the cell type's CELLS per domain; OFF by default (dedup fixes the over-clustering it patched)
     dedup_spots: bool = True        # collapse same-spot same-CT duplicate cells before clustering (Spotiphy); guarded -> auto no-op on real per-cell variation. Set False for true-counts / per-cell data.
 
-_SAMPLE_HYPEREDGES_HELP = ("Fraction of neighborhood hyperedges kept per hop at inference (fan-out cap, avoids OOM). "
-           "1.0 = full neighborhood (no sampling, deterministic).")
-_SAMPLE_CELLS_HELP = ("Fraction of neighborhood cells kept per hyperedge expansion at inference (fan-out cap, avoids OOM). "
-           "1.0 = full neighborhood.")
+_SAMPLE_HYPEREDGES_HELP = ("Fraction of neighborhood hyperedges kept per hop (fan-out cap, avoids OOM). "
+                           "1.0 = full neighborhood (no sampling).")
+_SAMPLE_CELLS_HELP = ("Fraction of neighborhood cells kept per hyperedge expansion (fan-out cap, avoids OOM). "
+                      "1.0 = full neighborhood (no sampling).")
 _COPY_VAR_COLS_HELP = "var columns to copy from the decomposed AnnData into the aggregated AnnData."
 
 _GENE_SCORES_HELP = ("Also write a per-gene table (*_scores.csv) for benchmarking: every gene with its "
@@ -137,6 +137,8 @@ def train_embedder(
     project: ProjectArgs,
     common: CommonArgs = CommonArgs(),
     num_epochs: Annotated[int, Parameter(help="Training epochs.")] = 1000,
+    sample_hyperedges: Annotated[float, Parameter(help=_SAMPLE_HYPEREDGES_HELP)] = 0.7,
+    sample_cells: Annotated[float, Parameter(help=_SAMPLE_CELLS_HELP)] = 0.7,
     model: EmbedderCLIArgs = EmbedderCLIArgs(),
     runtime: RuntimeArgs = RuntimeArgs(),
 ):
@@ -159,6 +161,8 @@ def train_embedder(
         num_epochs,
         runtime.batch_size,
         runtime.accelerator,
+        K=sample_hyperedges,
+        M=sample_cells,
     )
 
 @app.command(help="Use the trained hypergraph model to generate the embeddings.",
@@ -286,7 +290,8 @@ def run_pipeline(
     ctsvg: CTSVGArgs = CTSVGArgs(),
 ):
     logger.info("run-pipeline 1/6: train-embedder")
-    train_embedder(project, common=common, num_epochs=num_epochs, model=model, runtime=runtime)
+    train_embedder(project, common=common, num_epochs=num_epochs, sample_hyperedges=sample_hyperedges,
+                   sample_cells=sample_cells, model=model, runtime=runtime)
     logger.info("run-pipeline 2/6: make-embedding")
     make_embedding(project, sample_hyperedges=sample_hyperedges, sample_cells=sample_cells, common=common, model=model, runtime=runtime)
     logger.info("run-pipeline 3/6: compute-spatial-domains")
@@ -302,6 +307,8 @@ def run_pipeline(
 def perform_model_evaluation(
     project: ProjectArgs,         
     num_epochs: Annotated[int, Parameter(help="Training epochs.")] = 1000,
+    sample_hyperedges: Annotated[float, Parameter(help=_SAMPLE_HYPEREDGES_HELP)] = 0.7,
+    sample_cells: Annotated[float, Parameter(help=_SAMPLE_CELLS_HELP)] = 0.7,
     model: EmbedderCLIArgs = EmbedderCLIArgs(),
     runtime: RuntimeArgs = RuntimeArgs(),
     clustering: ClusterArgs = ClusterArgs(),
@@ -327,6 +334,8 @@ def perform_model_evaluation(
         clustering=vars(clustering),
         ct_clustering=vars(ct_clustering),
         n=num_runs,
+        K=sample_hyperedges,
+        M=sample_cells,
     )
 
 @app.command(help="Check if project folder exists.",
