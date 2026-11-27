@@ -4,7 +4,7 @@ import numpy as np
 import scanpy as sc
 import scipy.sparse as sp
 import torch
-from torch_geometric.nn import knn_graph
+from scipy.spatial import cKDTree
 
 from ..data import STHypergraphData
 from ..metadata import ProjectMetadata
@@ -15,7 +15,7 @@ def build_hyperedge_feats(adata_st, spot_name_to_index, n_hyperedge_feats=3000):
     """Per-spot pseudobulk target for the hyperedge reconstruction head.
 
     Hyperedge s is 1:1 with spot s. Its members are the cells of spot s and of
-    its k-1 nearest spots (knn_graph with loop=True). The decoder pools the
+    its k-1 nearest spots (scipy cKDTree, k nearest incl. s). The decoder pools the
     embeddings of all members and predicts spot s's own pseudobulk from them.
     Spot s's cells are among the pooled members, so the target is partly
     reconstructed from those cells' own embeddings; it is not a prediction of
@@ -60,13 +60,16 @@ def create_hypergraph_data(adata_st, n_features=3000, num_neighbor_spots=7,
     # map spot names to numerical position in adata_st
     spot_name_to_index = {spot_name: i for i, spot_name in enumerate(adata_st.obs_names)}
 
-    # create st graph. This graph will be the basis of our hyperedges
-    # when self loops are also computed in knn graph the self loop is also included when counting the number of nearest
-    # neighbors. For example, if k = 6, 5 edges are incident to other nodes and 1 is a self loop.
-    # The resulting edge index is a 2x(nk) matrix, with the 1st row indicating the nodes that are nearest to the node
-    # 2nd row. The 2nd row is sorted in ascending order.
-    coords = torch.from_numpy(adata_st.obsm['spatial'])
-    edge_index = knn_graph(coords, k=num_neighbor_spots, loop=True)
+    # create st graph. This graph will be the basis of our hyperedges.
+    # Each spot s gets its num_neighbor_spots nearest spots, s itself included (distance 0): for k = 7,
+    # s and its 6 nearest. Ties at the k-th neighbour are broken by scipy's KD-tree order (deterministic
+    # for the same coordinates). edge_index is 2 x (n*k): row 0 = neighbour q, row 1 = spot s (ascending).
+    coords = np.asarray(adata_st.obsm['spatial'], dtype=np.float64)
+    k = min(num_neighbor_spots, len(coords))
+    _, nn_idx = cKDTree(coords).query(coords, k=k)
+    nn_idx = np.asarray(nn_idx, dtype=np.int64).reshape(len(coords), k)
+    edge_index = torch.stack([torch.from_numpy(nn_idx.ravel()),
+                              torch.arange(len(coords), dtype=torch.int64).repeat_interleave(k)])
 
     ct_list = project_metadata.ct_list
 
